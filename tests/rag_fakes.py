@@ -12,7 +12,10 @@ class FakeRAGMode(str, Enum):
 
 
 class FakeTraceStage(str, Enum):
+    REWRITE = "rewrite"
     RETRIEVE = "retrieve"
+    RERANK = "rerank"
+    COMPRESS = "compress"
     GENERATE = "generate"
     COMPLETE = "complete"
     ERROR = "error"

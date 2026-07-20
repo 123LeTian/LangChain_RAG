@@ -1,6 +1,7 @@
 """Isolated vector + keyword hybrid retrieval."""
 
 from copy import deepcopy
+from contextvars import ContextVar
 import re
 from typing import Any, Dict, List, Optional
 
@@ -70,6 +71,10 @@ class KeywordSearcher:
         self._chunks = []
 
 
+class HybridRetrievalError(RuntimeError):
+    """Raised when both vector and keyword hybrid branches fail."""
+
+
 class HybridRetriever:
     """Weighted hybrid retriever with strict B3 search and legacy retrieve."""
 
@@ -88,6 +93,16 @@ class HybridRetriever:
         self.vector_retriever = VectorRetriever(embedder, index)
         self.keyword_searcher = KeywordSearcher()
         self.alpha = alpha
+        self._warning_context: ContextVar[tuple[str, ...]] = ContextVar(
+            f"hybrid_warnings_{id(self)}",
+            default=(),
+        )
+
+    @property
+    def last_warnings(self) -> List[str]:
+        """Warnings produced by the latest search in the current task context."""
+
+        return list(self._warning_context.get())
 
     def add_chunks(self, chunks: List[ChunkRecord]) -> None:
         self.index.add_chunks(chunks)
@@ -100,19 +115,43 @@ class HybridRetriever:
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievalHit]:
-        vec_hits = self.vector_retriever.search(
-            query,
-            kb_id=kb_id,
-            top_k=top_k * 2,
-            filters=filters,
-        )
-        kw_hits = self.keyword_searcher.search(
-            query,
-            kb_id=kb_id,
-            top_k=top_k * 2,
-            filters=filters,
-        )
+        warnings = []
+        failures = []
+        try:
+            vec_hits = self.vector_retriever.search(
+                query,
+                kb_id=kb_id,
+                top_k=top_k * 2,
+                filters=filters,
+            )
+        except Exception as exc:
+            vec_hits = []
+            failures.append(exc)
+            warnings.append(self._branch_warning("vector", exc))
+        try:
+            kw_hits = self.keyword_searcher.search(
+                query,
+                kb_id=kb_id,
+                top_k=top_k * 2,
+                filters=filters,
+            )
+        except Exception as exc:
+            kw_hits = []
+            failures.append(exc)
+            warnings.append(self._branch_warning("keyword", exc))
+        self._warning_context.set(tuple(warnings))
+        if len(failures) == 2:
+            raise HybridRetrievalError("; ".join(warnings))
         return self._merge(vec_hits, kw_hits, top_k, rank_start=1)
+
+    @staticmethod
+    def _branch_warning(branch: str, error: Exception) -> str:
+        detail = str(error).replace("\n", " ").strip()[:160]
+        suffix = f": {detail}" if detail else ""
+        return (
+            f"hybrid {branch} branch degraded "
+            f"({type(error).__name__}){suffix}"
+        )
 
     def retrieve(self, query: str, top_k: int = 5) -> List[RetrievalHit]:
         """Legacy explicit all-KB path retained for existing callers."""
@@ -158,4 +197,4 @@ class HybridRetriever:
         return result
 
 
-__all__ = ["HybridRetriever", "KeywordSearcher"]
+__all__ = ["HybridRetrievalError", "HybridRetriever", "KeywordSearcher"]

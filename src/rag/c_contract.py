@@ -36,6 +36,12 @@ class CContractFactory:
 
         return self._models().RAGMode.NAIVE
 
+    @property
+    def advanced_mode(self) -> Any:
+        """Return C's canonical ``RAGMode.ADVANCED`` value."""
+
+        return self._models().RAGMode.ADVANCED
+
     def stage(self, name: str) -> Any:
         """Return a canonical C ``TraceStage`` member by enum name."""
 
@@ -66,8 +72,18 @@ def resolve_naive_mode() -> Any:
         return "naive"
 
 
+def resolve_advanced_mode() -> Any:
+    """Resolve C's advanced enum with a registry-compatible fallback."""
+
+    try:
+        return CContractFactory().advanced_mode
+    except CContractUnavailableError:
+        return "advanced"
+
+
 __all__ = [
     "CContractFactory",
     "CContractUnavailableError",
+    "resolve_advanced_mode",
     "resolve_naive_mode",
 ]
