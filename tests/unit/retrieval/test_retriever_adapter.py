@@ -85,6 +85,49 @@ def test_adapter_structurally_satisfies_c_protocol_and_preserves_hits():
     }
 
 
+def test_adapter_search_bridges_c_injection_to_b_strategy_once(monkeypatch):
+    adapter, embedder = make_adapter()
+    wrapped = adapter._retriever
+    original_search = wrapped.search
+    calls = []
+
+    def recording_search(query, kb_id, top_k=5, filters=None):
+        calls.append(
+            {
+                "query": query,
+                "kb_id": kb_id,
+                "top_k": top_k,
+                "filters": filters,
+            }
+        )
+        return original_search(
+            query=query,
+            kb_id=kb_id,
+            top_k=top_k,
+            filters=filters,
+        )
+
+    monkeypatch.setattr(wrapped, "search", recording_search)
+
+    hits = adapter.search(
+        query="query",
+        kb_id="kb-1",
+        top_k=1,
+        filters={"section": "Adapter"},
+    )
+
+    assert calls == [
+        {
+            "query": "query",
+            "kb_id": "kb-1",
+            "top_k": 1,
+            "filters": {"section": "Adapter"},
+        }
+    ]
+    assert embedder.count == 1
+    assert [hit.chunk.id for hit in hits] == ["chunk-1"]
+
+
 def test_adapter_default_factory_builds_c_contract_shape(monkeypatch):
     class Model:
         def __init__(self, **kwargs):

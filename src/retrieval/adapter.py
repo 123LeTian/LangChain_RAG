@@ -45,6 +45,28 @@ class VectorRetrieverAdapter:
 
         return self._retriever.retriever_name
 
+    def search(
+        self,
+        query: str,
+        kb_id: str,
+        top_k: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[RetrievalHit]:
+        """Forward B strategy searches while retaining C's adapter contract.
+
+        C's service injects its ``RetrieverProtocol`` implementation directly
+        into ``RAGContext``.  B strategies consume the isolated ``search``
+        boundary, so the adapter must expose both surfaces without performing
+        a second embedding or retrieval operation.
+        """
+
+        return self._retriever.search(
+            query=query,
+            kb_id=kb_id,
+            top_k=top_k,
+            filters=filters,
+        )
+
     def retrieve(self, query: str, top_k: int = 5, **kwargs: Any) -> Any:
         """Extract C parameters, execute one search, and build RAGContext."""
 
