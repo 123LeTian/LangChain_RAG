@@ -34,7 +34,7 @@ from src.agent.state import (
     set_error,
 )
 from src.agent.router import AgentRouter, RouterResult
-from src.agent.tools import ToolExecutor, ToolRegistry
+from src.agent.tools import ToolExecutor, ToolRegistry, ToolResult
 from src.models.rag import RAGContext, RAGQuery, RAGResponse, RAGSource, StrategyType
 from src.rag.base import GeneratorProtocol, GraphRetrieverProtocol, RetrieverProtocol
 
@@ -74,36 +74,24 @@ class AgentWorkflow:
     async def run(self, state: AgentRunState, context: RAGContext) -> AgentRunState:
         """Execute the full agent workflow.
 
-        Args:
-            state:   Initial or resumed AgentRunState.
-            context: RAGContext with injected dependencies (llm, tools, retriever).
-
-        Returns:
-            The final AgentRunState with answer and status.
+        Error degradation built-in:
+          - Graph tool fails → auto-fallback to vector_search
+          - All tools fail → structured error (no exception to LLM)
+          - Every error recorded in state.errors + TraceRecorder
         """
         state.max_steps = self.max_steps
 
         try:
-            # Step 1: Intent Detection
             state = await self._intent_detection(state)
-
-            # Step 2: Tool Selection
             state = await self._tool_selection(state)
-
-            # Step 3: Tool Execution (counts as 1+ steps)
             state = await self._tool_execution(state, context)
-
-            # Step 4: Generate
             state = await self._generate(state, context)
-
-            # Step 5: Verify
             state = await self._verify(state, context)
-
         except Exception as exc:
             logger.exception("Agent workflow failed")
-            state.set_failed(str(exc))
+            _record_error(context, "workflow", str(exc))
+            state.set_failed(_sanitize_error(exc))
 
-        # Ensure terminal state
         if not state.is_finished:
             if state.final_answer:
                 state.status = "completed"
@@ -137,27 +125,37 @@ class AgentWorkflow:
         return state
 
     async def _tool_execution(self, state: AgentRunState, context: RAGContext) -> AgentRunState:
-        """Execute each selected tool in order, one step per tool.
+        """Execute each selected tool with degradation support.
 
-        Stops early if max_steps is reached.
+        Degradation rules:
+          - graph_search fails → auto-fallback to vector_search
+          - Any tool fails → recorded in state.errors + TraceRecorder
+          - All tools fail → all_tools_failed flag set (structured error, not exception)
         """
         executor = _get_executor(context)
         if executor is None:
             state.errors.append("No ToolExecutor available in context")
+            _record_error(context, "tool_execution", "No ToolExecutor available")
+            state.tool_results["__all_tools_failed__"] = True
             return state
 
-        for tool_name in state.selected_tools:
+        tool_failures = 0
+        total_tools = len(state.selected_tools)
+
+        for tool_name in list(state.selected_tools):
             if state.is_max_steps_exceeded:
                 state.errors.append(f"Step budget exhausted before executing '{tool_name}'")
                 break
 
             state.record_step(f"tool_execution:{tool_name}")
-
-            # Build tool arguments from query + context
             kwargs: Dict[str, Any] = {"query": state.query}
-            if tool_name == "document_summary" and state.tool_results.get("vector_search"):
-                kwargs["chunks"] = state.tool_results["vector_search"]
-            if tool_name == "answer_verify":
+
+            # Build tool-specific arguments
+            if tool_name == "document_summary":
+                vs_data = state.tool_results.get("vector_search")
+                if isinstance(vs_data, list):
+                    kwargs["chunks"] = vs_data
+            elif tool_name == "answer_verify":
                 kwargs["answer"] = state.final_answer or ""
                 all_chunks = []
                 for key in ("vector_search", "graph_search"):
@@ -166,37 +164,93 @@ class AgentWorkflow:
                         all_chunks.extend(val)
                 kwargs["chunks"] = all_chunks or None
 
+            # Execute tool
             try:
                 result = await executor.execute(tool_name, **kwargs)
-                state.tool_results[tool_name] = result.data if result.success else None
-                if not result.success:
-                    state.errors.append(f"Tool '{tool_name}' failed: {result.error}")
             except Exception as exc:
-                state.errors.append(f"Tool '{tool_name}' exception: {exc}")
+                result = ToolResult(success=False, error=_sanitize_error(exc), tool_name=tool_name)
+
+            # ── Degradation: graph_search fails → try vector_search ──
+            if not result.success and tool_name == "graph_search":
+                logger.warning("graph_search failed, degrading to vector_search: %s", result.error)
+                state.errors.append(f"graph_search failed (degrading to vector_search): {result.error}")
+                _record_error(context, "graph_search", result.error or "unknown")
+
+                # Fallback: try vector_search
+                try:
+                    fb_result = await executor.execute("vector_search", query=state.query)
+                    if fb_result.success:
+                        state.tool_results["vector_search"] = fb_result.data
+                        state.tool_results["graph_search"] = None
+                        state.errors.append("graph_search degraded → vector_search succeeded")
+                        _record_error(context, "graph_degraded_to_vector",
+                                      f"graph_search failed, vector_search succeeded")
+                        continue  # Skip failure counting
+                    else:
+                        tool_failures += 1
+                        state.tool_results["graph_search"] = None
+                except Exception as fb_exc:
+                    tool_failures += 1
+                    state.tool_results["graph_search"] = None
+                    state.errors.append(f"vector_search fallback also failed: {_sanitize_error(fb_exc)}")
+                continue
+
+            # Record result
+            if result.success:
+                state.tool_results[tool_name] = result.data
+            else:
                 state.tool_results[tool_name] = None
+                tool_failures += 1
+                state.errors.append(f"Tool '{tool_name}' failed: {result.error}")
+                _record_error(context, tool_name, result.error or "unknown")
+
+        # ── All tools failed → structured error ──
+        if total_tools > 0 and tool_failures >= total_tools:
+            state.tool_results["__all_tools_failed__"] = True
+            state.errors.append(
+                f"All {total_tools} tool(s) failed. Errors recorded in trace. "
+                f"Answer will be generated from LLM knowledge only."
+            )
+            _record_error(context, "all_tools_failed",
+                          f"All {total_tools} tools failed, using LLM-only generation")
 
         return state
 
     async def _generate(self, state: AgentRunState, context: RAGContext) -> AgentRunState:
-        """Generate the final answer from tool results."""
+        """Generate the final answer from tool results.
+
+        IMPORTANT: Exception stack traces are NEVER sent to the LLM.
+        Only sanitized, user-facing error summaries are included.
+        """
         if state.is_max_steps_exceeded:
             state.set_failed("Step budget exhausted before generation")
             return state
 
         state.record_step("generate")
 
-        # Collect context from tool results
+        # Collect context from tool results (sanitized — no stack traces)
         context_parts: List[str] = []
         for key in ("vector_search", "graph_search", "document_summary"):
             val = state.tool_results.get(key)
             if isinstance(val, list):
                 for item in val:
                     if isinstance(item, dict):
-                        context_parts.append(item.get("content", "") or item.get("summary", ""))
+                        content = item.get("content", "") or item.get("summary", "")
+                        if content:
+                            context_parts.append(_sanitize_llm_context(content))
             elif isinstance(val, dict):
-                context_parts.append(val.get("summary", "") or str(val))
+                summary = val.get("summary", "")
+                if summary:
+                    context_parts.append(_sanitize_llm_context(str(summary)))
             elif isinstance(val, str):
-                context_parts.append(val)
+                context_parts.append(_sanitize_llm_context(val))
+
+        # Add degradation notice if all tools failed
+        if state.tool_results.get("__all_tools_failed__"):
+            context_parts.insert(0,
+                "[Note: All retrieval tools were unavailable. "
+                "Answering from built-in knowledge only.]"
+            )
 
         combined_context = "\n\n".join(context_parts) if context_parts else "No context available."
 
@@ -208,9 +262,15 @@ class AgentWorkflow:
                     context=combined_context,
                 )
             except Exception as exc:
-                answer = f"[Generation failed: {exc}]"
+                # NEVER send the raw exception to the user — sanitize it
+                answer = "[Generation temporarily unavailable. Please try again.]"
+                _record_error(context, "generate", _sanitize_error(exc))
         else:
-            answer = f"[No LLM] Query: {state.query}. Context: {len(context_parts)} sources available."
+            answer = (
+                f"I cannot provide a detailed answer right now. "
+                f"Your query was: '{state.query}'. "
+                f"Available context: {len(context_parts)} sources."
+            )
 
         state.set_answer(answer)
         return state
@@ -506,3 +566,74 @@ def _format_context_for_generation(state: AgentState) -> str:
 def _heuristic_reasoning(query: str, chunks: List[Dict[str, Any]]) -> str:
     if not chunks: return f"No information retrieved for query: {query}"
     return f"Retrieved {len(chunks)} chunks for query: {query}. Sufficient information appears to be available."
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Error sanitization — NEVER send stack traces to LLM
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Return a user-safe error message without stack trace.
+
+    Example: RuntimeError('Connection refused') → 'Tool error: Connection refused'
+    """
+    msg = str(exc)
+    # Remove file paths and line numbers
+    if "File " in msg and "line " in msg:
+        # Extract just the final error line
+        lines = msg.strip().split("\n")
+        msg = lines[-1] if lines else msg
+    # Truncate to reasonable length
+    if len(msg) > 300:
+        msg = msg[:300] + "..."
+    return f"{type(exc).__name__}: {msg}"
+
+
+def _sanitize_llm_context(text: str) -> str:
+    """Strip any stack-trace-like content from text before sending to LLM.
+
+    Detects patterns like 'Traceback (most recent call last):', file paths,
+    and exception class names followed by stack frames, and removes them.
+    """
+    if not text:
+        return text
+    # If it looks like a stack trace, replace with a safe message
+    if "Traceback (most recent call last)" in text:
+        return "[Error details removed — see trace for full information]"
+    if text.strip().startswith("File ") and "line " in text:
+        return "[Stack frame removed]"
+    return text
+
+
+def _record_error(context: RAGContext, stage_name: str, message: str) -> None:
+    """Record an error event in the TraceRecorder if available.
+
+    Args:
+        context:    RAGContext (may have trace_recorder).
+        stage_name: Name of the stage/tool that failed.
+        message:    Sanitized error message (no stack trace).
+    """
+    recorder = getattr(context, "trace_recorder", None)
+    if recorder is None:
+        return
+    try:
+        from src.models.rag import TraceEvent, TraceStage
+        from datetime import datetime, timezone
+        trace_id = context.metadata.get("trace_id", "unknown")
+        evt = TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.ERROR,
+            started_at=datetime.now(timezone.utc),
+            duration_ms=0.0,
+            input_summary=stage_name,
+            output_summary=message,
+        )
+        if hasattr(recorder, "record"):
+            recorder.record(trace_id, evt)
+        elif hasattr(recorder, "start"):
+            # Fallback for older TraceRecorder API
+            recorder.start(trace_id, TraceStage.ERROR, stage_name)
+            recorder.end(trace_id, TraceStage.ERROR, message)
+    except Exception:
+        pass  # Trace failure must never break the pipeline
