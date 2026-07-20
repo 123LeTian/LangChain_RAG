@@ -1,31 +1,23 @@
 # RAG Strategies — Multi-owner: B, C, D
 #
-# Each strategy module auto-registers with the StrategyRegistry.
+# Each strategy module auto-registers with the global RAGStrategyRegistry.
 # Import the modules to trigger registration.
 #
 # C-owned strategies (implemented):
-#   from src.rag.strategies import modular     # Owner: C
-#   from src.rag.strategies import agentic     # Owner: C
+#   from src.rag.strategies import modular     — ModularRAGStrategy + ModuleConfig
+#   from src.rag.strategies import agentic     — AgenticRAGStrategy
 #
 # B-owned strategies (to be implemented by B):
-#   from src.rag.strategies import naive       # Owner: B
-#   from src.rag.strategies import advanced    # Owner: B
+#   from src.rag.strategies import naive       — Owner: B
+#   from src.rag.strategies import advanced    — Owner: B
 #
-# D-owned strategies (to be implemented by D):
-#   from src.rag.strategies import graph_rag   # Owner: D
-#
-# Or use auto-discovery:
-#   registry.discover_all("src.rag.strategies")
+# D-owned strategy (to be implemented by D):
+#   from src.rag.strategies import graph_rag   — Owner: D
 
 from src.rag.strategies.modular import (
-    CompressModule,
-    GenerateModule,
-    ModularPipeline,
-    ModularPipelineBuilder,
+    ModuleConfig,
     ModularRAGStrategy,
-    QueryRewriteModule,
-    RerankModule,
-    RetrieveModule,
+    validate_module_config,
 )
 from src.rag.strategies.agentic import AgenticRAGStrategy
 
@@ -39,13 +31,8 @@ from src.rag.strategies.agentic import AgenticRAGStrategy
 __all__ = [
     # Modular (Owner: C)
     "ModularRAGStrategy",
-    "ModularPipeline",
-    "ModularPipelineBuilder",
-    "CompressModule",
-    "GenerateModule",
-    "QueryRewriteModule",
-    "RerankModule",
-    "RetrieveModule",
+    "ModuleConfig",
+    "validate_module_config",
     # Agentic (Owner: C)
     "AgenticRAGStrategy",
 ]

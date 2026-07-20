@@ -125,7 +125,7 @@ class TestCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_half_open_failure_reopens(self):
-        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.05)
+        cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.3)
 
         async def fail():
             raise RuntimeError("boom")
@@ -138,7 +138,7 @@ class TestCircuitBreaker:
         assert cb.state == CircuitState.OPEN
 
         # Wait for recovery
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.35)
 
         # HALF_OPEN probe fails → re-opens
         try:

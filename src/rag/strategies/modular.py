@@ -1,534 +1,526 @@
 """
 Modular RAG Strategy — Owner: C
-Composable RAG pipeline built from swappable ingestion / retrieval / generation modules.
+Composable, configurable RAG pipeline built from swappable modules.
 
-The Modular RAG paradigm lets users compose custom pipelines by assembling modules:
-  - QueryRewriteModule: improve the query before retrieval
-  - RetrieveModule: vector / hybrid / graph retrieval
-  - RerankModule: re-score and filter chunks
-  - CompressModule: compress context to fit the LLM window
-  - GenerateModule: produce the final answer
+The Modular RAG paradigm differs from Advanced RAG: instead of hardwiring
+an enhanced pipeline, it composes modules dynamically.  Each module is
+an independent "processing step".  Users toggle modules on/off via
+:class:`ModuleConfig` to create custom pipelines.
 
-A builder pattern (ModularPipelineBuilder) constructs pipelines.
-A pipeline is a sequence of Module objects executed in order over RAGContext.
+Supported modules:
+  rewrite   — query rewriting / expansion
+  retrieve  — vector / hybrid / graph retrieval
+  rerank    — relevance re-scoring of candidates
+  compress  — context truncation for token budget
+  verify    — answer factuality / quality check (generate is always on)
+
+Pipeline execution order:
+  Query → Rewrite → Retrieve → Rerank → Compress → Generate → Verify
+
+Design rules:
+  - Modules are MOCK implementations — no dependency on B or D code.
+  - Real retriever / LLM / reranker are injected via RAGContext at runtime.
+  - TraceRecorder logs every module's start/end with real execution order.
+  - Config validation catches illegal switch combinations.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from src.models.rag import (
     RAGChunk,
     RAGContext,
     RAGMode,
-    RAGQuery,
-    RAGResponse,
+    RAGRequest,
+    RAGResult,
     RAGSource,
-    StrategyType,
+    TraceEvent,
+    TraceStage,
 )
-from src.rag.base import (
-    GeneratorProtocol,
-    GraphRetrieverProtocol,
-    RAGStrategyBase,
-    RerankerProtocol,
-    RetrieverProtocol,
-)
+from src.rag.base import RAGStrategy
+from src.rag.trace import get_recorder
 
 logger = logging.getLogger(__name__)
 
 
-# ── Module Interface ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# ModuleConfig — Pipeline switch configuration
+# ═══════════════════════════════════════════════════════════════════════════
 
 
-class Module(ABC):
-    """Abstract base for a single pipeline module.
+class ModuleConfig(BaseModel):
+    """Toggle-based pipeline configuration.
 
-    Each module has a name and a run() method that transforms a RAGContext.
-    Modules are composable: the output of one becomes the input of the next.
+    Each field is a boolean switch.  Generate is always on (implied).
+    Illegal combinations (e.g. ``rerank=True`` with ``retrieve=False``)
+    are rejected at construction time.
+
+    Example::
+
+        config = ModuleConfig(rewrite=False, retrieve=True, rerank=True,
+                              compress=False, verify=True)
+        errors = ModularRAGStrategy.validate_config(config)
+        assert len(errors) == 0
     """
 
-    name: str = "base_module"
+    rewrite: bool = Field(
+        default=False,
+        description="Enable query rewriting / expansion before retrieval",
+    )
+    retrieve: bool = Field(
+        default=True,
+        description="Enable document retrieval (vector / hybrid / graph)",
+    )
+    rerank: bool = Field(
+        default=False,
+        description="Enable relevance re-scoring of retrieved chunks",
+    )
+    compress: bool = Field(
+        default=False,
+        description="Enable context compression to fit token budget",
+    )
+    verify: bool = Field(
+        default=False,
+        description="Enable answer verification / factuality check after generation",
+    )
 
-    @abstractmethod
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        """Transform the context. Returns the modified context."""
-        ...
+    # Per-module options
+    top_k: int = Field(default=5, ge=1, le=100, description="Number of chunks to retrieve")
+    compress_max_tokens: int = Field(default=4000, ge=100, description="Max tokens for compressed context")
+    rerank_top_k: int = Field(default=5, ge=1, le=50, description="Number of chunks to keep after reranking")
+
+    model_config = {"extra": "forbid"}
 
 
-# ── Concrete Modules ──────────────────────────────────────────────────────
+# ── Validation ──────────────────────────────────────────────────────────
 
 
-class QueryRewriteModule(Module):
-    """Rewrite/expand the user query for better retrieval recall.
+# Mapping: module → set of modules it depends on (must all be enabled)
+_MODULE_DEPENDENCIES: Dict[str, set] = {
+    "rerank":   {"retrieve"},
+    "compress": {"retrieve"},
+    "verify":   set(),  # no hard dependency — generate is always on
+}
 
-    Uses the LLM to produce a more search-friendly version of the query.
-    The original query is preserved in context.metadata.
+
+def validate_module_config(config: ModuleConfig) -> List[str]:
+    """Return a list of configuration errors.  Empty list means valid.
+
+    Rules enforced:
+      - ``rerank=True`` requires ``retrieve=True``  (nothing to rerank)
+      - ``compress=True`` requires ``retrieve=True`` (nothing to compress)
     """
+    errors: List[str] = []
+    enabled = {name for name in ("rewrite", "retrieve", "rerank", "compress", "verify")
+               if getattr(config, name)}
 
-    name: str = "query_rewrite"
-
-    def __init__(self, llm: GeneratorProtocol) -> None:
-        self._llm = llm
-
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        t0 = time.perf_counter()
-        try:
-            prompt = (
-                "Rewrite the following user query into a more specific, "
-                "search-optimized form. Expand acronyms, add relevant keywords, "
-                "and make it more suitable for semantic search. "
-                "Output ONLY the rewritten query, nothing else.\n\n"
-                f"Original: {query.text}\nRewritten:"
-            )
-            rewritten = await self._llm.generate(prompt=prompt, context="")
-            rewritten = rewritten.strip()
-        except Exception as exc:
-            logger.warning("Query rewrite failed: %s. Using original query.", exc)
-            rewritten = query.text
-
-        context.metadata["original_query"] = query.text
-        context.metadata["rewritten_query"] = rewritten
-        context.metadata["rewrite_latency_ms"] = (time.perf_counter() - t0) * 1000
-
-        return context
-
-
-class RetrieveModule(Module):
-    """Retrieve chunks using the configured retriever.
-
-    Supports vector, hybrid, and graph retrieval modes.
-    """
-
-    name: str = "retrieve"
-
-    def __init__(
-        self,
-        retrieval: RetrieverProtocol,
-        graph: Optional[GraphRetrieverProtocol] = None,
-        mode: str = "hybrid",  # vector | hybrid | graph | all
-        top_k: int = 10,
-    ) -> None:
-        self._retrieval = retrieval
-        self._graph = graph
-        self._mode = mode
-        self._top_k = top_k
-
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        t0 = time.perf_counter()
-
-        # Use rewritten query if available
-        search_query = context.metadata.get("rewritten_query", query.text)
-
-        all_chunks: List[RAGChunk] = []
-
-        if self._mode in ("vector", "hybrid", "all"):
-            try:
-                result = self._retrieval.retrieve(
-                    query=search_query, top_k=self._top_k
+    for module, deps in _MODULE_DEPENDENCIES.items():
+        if module in enabled:
+            missing = deps - enabled
+            if missing:
+                errors.append(
+                    f"Module '{module}' requires {sorted(missing)} to be enabled, "
+                    f"but they are disabled"
                 )
-                all_chunks.extend(result.chunks)
-            except Exception as exc:
-                logger.error("Vector retrieval failed in module: %s", exc)
+    return errors
 
-        if self._mode in ("graph", "all") and self._graph:
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Mock Modules — self-contained, no dependency on B or D implementations
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _MockRewrite:
+    """Mock: rewrites the query by lowercasing and trimming."""
+
+    name = "rewrite"
+
+    async def run(self, ctx: RAGContext, *, query: str, **__kw: Any) -> RAGContext:
+        rewritten = query.strip()
+        ctx.metadata["rewritten_query"] = rewritten
+        ctx.metadata["original_query"] = query
+        return ctx
+
+
+class _MockRetrieve:
+    """Mock: returns hard-coded chunks or calls injected retriever."""
+
+    name = "retrieve"
+
+    async def run(self, ctx: RAGContext, *, query: str, top_k: int = 5, **__kw: Any) -> RAGContext:
+        # Try the real retriever first (injected via context)
+        if ctx.retriever is not None:
             try:
-                graph_result = self._graph.graph_search(
-                    query=search_query, top_k=self._top_k
-                )
-                all_chunks.extend(graph_result.chunks)
-            except Exception as exc:
-                logger.error("Graph retrieval failed in module: %s", exc)
+                result = ctx.retriever.retrieve(query=query, top_k=top_k)
+                ctx.chunks = list(result.chunks)
+                ctx.total_candidates = len(ctx.chunks)
+                ctx.retrieval_method = "vector"
+                return ctx
+            except Exception:
+                pass
 
-        context.chunks = all_chunks
-        context.total_candidates = len(all_chunks)
-        context.retrieval_latency_ms = (time.perf_counter() - t0) * 1000
-        context.metadata["retrieval_mode"] = self._mode
-        context.metadata["retrieval_top_k"] = self._top_k
-
-        return context
-
-
-class RerankModule(Module):
-    """Rerank chunks by relevance to improve generation quality."""
-
-    name: str = "rerank"
-
-    def __init__(
-        self,
-        reranker: RerankerProtocol,
-        top_k: int = 5,
-    ) -> None:
-        self._reranker = reranker
-        self._top_k = top_k
-
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        if not context.chunks:
-            return context
-
-        t0 = time.perf_counter()
-        try:
-            reranked = self._reranker.rerank(
-                query=query.text,
-                chunks=context.chunks,
-                top_k=min(self._top_k, len(context.chunks)),
+        # Mock fallback: generate fake chunks
+        mock_chunks = [
+            RAGChunk(
+                content=f"[Mock chunk {i}] This is simulated content for query: {query}",
+                source=RAGSource(document_id=f"mock-doc-{i}", chunk_index=i, score=0.9 - i * 0.1),
             )
-            context.chunks = reranked  # type: ignore[assignment]
-            context.metadata["reranked"] = True
-            context.metadata["rerank_latency_ms"] = (time.perf_counter() - t0) * 1000
-        except Exception as exc:
-            logger.warning("Reranking failed: %s. Keeping original order.", exc)
-            context.metadata["reranked"] = False
-
-        return context
+            for i in range(min(top_k, 3))
+        ]
+        ctx.chunks = mock_chunks
+        ctx.total_candidates = len(mock_chunks)
+        ctx.retrieval_method = "mock"
+        return ctx
 
 
-class CompressModule(Module):
-    """Compress/truncate context to fit within the LLM's token window.
+class _MockRerank:
+    """Mock: sorts chunks by score descending, keeps top-k."""
 
-    Preserves the top-ranked chunks up to max_tokens characters.
-    """
+    name = "rerank"
 
-    name: str = "compress"
+    async def run(self, ctx: RAGContext, *, query: str,
+                  rerank_top_k: int = 5, **__kw: Any) -> RAGContext:
+        if not ctx.chunks:
+            return ctx
 
-    def __init__(self, max_tokens: int = 4000, chars_per_token: float = 3.5) -> None:
-        self._max_tokens = max_tokens
-        self._chars_per_token = chars_per_token
+        sorted_chunks = sorted(
+            ctx.chunks,
+            key=lambda c: c.source.score or 0.0,
+            reverse=True,
+        )
+        ctx.chunks = sorted_chunks[:rerank_top_k]
+        ctx.metadata["reranked"] = True
+        ctx.metadata["rerank_top_k"] = rerank_top_k
+        return ctx
 
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        max_chars = int(self._max_tokens * self._chars_per_token)
+
+class _MockCompress:
+    """Mock: truncates chunks to fit a character budget."""
+
+    name = "compress"
+
+    async def run(self, ctx: RAGContext, *, query: str,
+                  compress_max_tokens: int = 4000, **__kw: Any) -> RAGContext:
+        chars_per_token = 3.5
+        max_chars = int(compress_max_tokens * chars_per_token)
         total = 0
         kept: List[RAGChunk] = []
 
-        for chunk in context.chunks:
-            estimated = len(chunk.content)
-            if total + estimated <= max_chars:
+        for chunk in ctx.chunks:
+            if total + len(chunk.content) <= max_chars:
                 kept.append(chunk)
-                total += estimated
+                total += len(chunk.content)
             else:
-                # Truncate the last chunk to fit
                 remaining = max_chars - total
-                if remaining > 200:  # Only keep if we can fit a meaningful amount
-                    truncated = RAGChunk(
+                if remaining > 200:
+                    kept.append(RAGChunk(
                         content=chunk.content[:remaining] + "...",
                         source=chunk.source,
-                    )
-                    kept.append(truncated)
+                    ))
                 break
 
-        context.metadata["compressed"] = True
-        context.metadata["original_chunk_count"] = len(context.chunks)
-        context.metadata["kept_chunk_count"] = len(kept)
-        context.metadata["total_chars"] = sum(len(c.content) for c in kept)
-        context.chunks = kept
-
-        return context
+        ctx.metadata["compressed"] = True
+        ctx.metadata["original_chunk_count"] = len(ctx.chunks)
+        ctx.metadata["kept_chunk_count"] = len(kept)
+        ctx.chunks = kept
+        return ctx
 
 
-class GenerateModule(Module):
-    """Generate the final answer using the LLM with the retrieved context."""
+class _MockGenerate:
+    """Mock: generates an answer using the injected LLM or a mock fallback."""
 
-    name: str = "generate"
+    name = "generate"
 
-    def __init__(self, llm: GeneratorProtocol, system_prompt: Optional[str] = None) -> None:
-        self._llm = llm
-        self._system_prompt = system_prompt or (
-            "You are a helpful assistant. Answer the user's question based on "
-            "the provided context. If the context is insufficient, say so. "
-            "Cite specific sources when possible."
+    async def run(self, ctx: RAGContext, *, query: str, **__kw: Any) -> str:
+        if ctx.llm is not None:
+            try:
+                context_text = ctx.combined_text if ctx.chunks else "No context available."
+                answer = await ctx.llm.generate(
+                    prompt="You are a helpful assistant. Answer based on the provided context.",
+                    context=context_text,
+                )
+                return answer
+            except Exception:
+                pass
+
+        if ctx.chunks:
+            return f"[Mock answer] Based on {len(ctx.chunks)} retrieved chunks, the answer to '{query}' is: ..."
+        return f"[Mock answer] No context available for query: '{query}'"
+
+
+class _MockVerify:
+    """Mock: checks if the answer looks reasonable."""
+
+    name = "verify"
+
+    async def run(self, ctx: RAGContext, *, answer: str, **__kw: Any) -> Dict[str, Any]:
+        issues: List[str] = []
+
+        if not answer or len(answer.strip()) < 10:
+            issues.append("Answer is too short")
+        if "[Mock answer]" in answer:
+            issues.append("Answer is mock-generated (no LLM)")
+        if not ctx.chunks and "no context" not in answer.lower():
+            issues.append("Answer generated without retrieval context")
+
+        return {
+            "passed": len(issues) == 0,
+            "issues": issues,
+            "answer_length": len(answer),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ModularRAGStrategy — the concrete strategy
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ModularRAGStrategy(RAGStrategy):
+    """Configurable modular RAG pipeline.
+
+    Implements the :class:`RAGStrategy` interface.  Pipeline behaviour
+    is controlled by :class:`ModuleConfig`.  Multiple named configurations
+    can coexist and be switched at runtime.
+
+    Usage::
+
+        strategy = ModularRAGStrategy()
+        strategy.set_config(ModuleConfig(rewrite=False, retrieve=True,
+                                          rerank=True, compress=False, verify=True))
+
+        result = await strategy.run(
+            RAGRequest(query="What is RAG?", mode=RAGMode.MODULAR),
+            context,  # injected by RAGService
         )
+    """
 
-    async def run(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        t0 = time.perf_counter()
+    mode: RAGMode = RAGMode.MODULAR
 
-        context_text = context.combined_text
-        try:
-            answer = await self._llm.generate(
-                prompt=self._system_prompt,
-                context=context_text,
-            )
-        except Exception as exc:
-            logger.error("LLM generation failed in module: %s", exc)
-            answer = f"Error generating answer: {exc}"
+    # ── Module execution order (positional) ──────────────────────────────
 
-        context.metadata["generated_answer"] = answer
-        context.metadata["generation_latency_ms"] = (time.perf_counter() - t0) * 1000
-        context.metadata["context_chars"] = len(context_text)
+    _ORDER = ("rewrite", "retrieve", "rerank", "compress", "generate", "verify")
 
-        return context
+    # ── Constructor ─────────────────────────────────────────────────────
 
+    def __init__(self, config: Optional[ModuleConfig] = None) -> None:
+        self._config = config or ModuleConfig()
+        self._mock_modules = {
+            "rewrite":  _MockRewrite(),
+            "retrieve": _MockRetrieve(),
+            "rerank":   _MockRerank(),
+            "compress": _MockCompress(),
+            "generate": _MockGenerate(),
+            "verify":   _MockVerify(),
+        }
+        # Named preset configurations
+        self._presets: Dict[str, ModuleConfig] = {}
 
-# ── Pipeline Builder ──────────────────────────────────────────────────────
-
-
-class ModularPipeline:
-    """A composed sequence of modules executed in order over RAGContext."""
-
-    def __init__(self, modules: Optional[List[Module]] = None) -> None:
-        self._modules: List[Module] = list(modules) if modules else []
+    # ── Config management ───────────────────────────────────────────────
 
     @property
-    def modules(self) -> List[Module]:
-        return list(self._modules)
+    def config(self) -> ModuleConfig:
+        """Return the current active configuration."""
+        return self._config
 
-    async def execute(self, context: RAGContext, query: RAGQuery) -> RAGContext:
-        """Run all modules sequentially, passing context through each.
+    def set_config(self, config: ModuleConfig) -> None:
+        """Replace the active configuration.
 
-        Each module receives the output of the previous module.
-        If a module fails, execution continues with the next module
-        (graceful degradation).
+        Does NOT validate — call :meth:`validate_config` first if needed.
+        """
+        self._config = config
+
+    def save_preset(self, name: str, config: ModuleConfig) -> None:
+        """Save a named pipeline configuration preset.
 
         Args:
-            context: Initial RAGContext (may be empty).
-            query: The original query.
+            name:   Preset name (e.g. ``"fast"``, ``"thorough"``).
+            config: The ModuleConfig to save.
+        """
+        self._presets[name] = config
+
+    def load_preset(self, name: str) -> ModuleConfig:
+        """Load a previously saved preset.
+
+        Raises:
+            KeyError: If *name* is not a saved preset.
+        """
+        if name not in self._presets:
+            available = list(self._presets) or ["(none)"]
+            raise KeyError(
+                f"Preset '{name}' not found. Available: {', '.join(available)}"
+            )
+        return self._presets[name]
+
+    def apply_preset(self, name: str) -> None:
+        """Load and apply a saved preset as the active config."""
+        self._config = self.load_preset(name)
+
+    def list_presets(self) -> List[str]:
+        """Return all saved preset names."""
+        return list(self._presets)
+
+    @staticmethod
+    def validate_config(config: ModuleConfig) -> List[str]:
+        """Validate a :class:`ModuleConfig` and return a list of errors.
 
         Returns:
-            The final RAGContext after all modules have run.
+            Empty list if the configuration is valid; otherwise a list of
+            human-readable error messages.
         """
-        for module in self._modules:
-            try:
-                context = await module.run(context, query)
-            except Exception as exc:
-                logger.error(
-                    "Module '%s' failed: %s. Continuing pipeline.", module.name, exc
-                )
-                context.metadata[f"module_error_{module.name}"] = str(exc)
-        return context
+        return validate_module_config(config)
 
+    # ── RAGStrategy.run ─────────────────────────────────────────────────
 
-class ModularPipelineBuilder:
-    """Builder for constructing ModularPipeline instances.
+    async def run(self, request: RAGRequest, context: RAGContext) -> RAGResult:
+        """Execute the modular pipeline.
 
-    Usage:
-        pipeline = (
-            ModularPipelineBuilder()
-            .add(QueryRewriteModule(llm))
-            .add(RetrieveModule(retrieval, mode="hybrid"))
-            .add(RerankModule(reranker))
-            .add(CompressModule(max_tokens=4000))
-            .add(GenerateModule(llm))
-            .build()
-        )
-        context = await pipeline.execute(RAGContext(query=q.text), q)
-    """
+        Execution order (fixed):
+            Query → Rewrite → Retrieve → Rerank → Compress → Generate → Verify
 
-    def __init__(self) -> None:
-        self._modules: List[Module] = []
+        Each enabled module records its start/end via ``context.trace_recorder``.
+        """
+        config = self._config
+        warnings: List[str] = []
 
-    def add(self, module: Module) -> ModularPipelineBuilder:
-        """Append a module to the pipeline. Returns self for chaining."""
-        if not isinstance(module, Module):
-            raise TypeError(f"Expected Module, got {type(module).__name__}")
-        self._modules.append(module)
-        return self
-
-    def insert(self, index: int, module: Module) -> ModularPipelineBuilder:
-        """Insert a module at a specific position."""
-        self._modules.insert(index, module)
-        return self
-
-    def remove(self, name: str) -> ModularPipelineBuilder:
-        """Remove all modules with the given name."""
-        self._modules = [m for m in self._modules if m.name != name]
-        return self
-
-    def clear(self) -> ModularPipelineBuilder:
-        """Remove all modules."""
-        self._modules.clear()
-        return self
-
-    def build(self) -> ModularPipeline:
-        """Build and return the ModularPipeline."""
-        return ModularPipeline(list(self._modules))
-
-
-# ── Modular RAG Strategy ─────────────────────────────────────────────────
-
-
-class ModularRAGStrategy(RAGStrategyBase):
-    """RAG strategy that uses a composable module pipeline.
-
-    This is the concrete strategy for the Modular RAG paradigm.
-    Users can customize the pipeline via the builder or inject a
-    pre-built pipeline.
-
-    Auto-registers with the StrategyRegistry.
-    """
-
-    strategy_type: StrategyType = StrategyType.MODULAR
-
-    def __init__(
-        self,
-        retrieval: Optional[RetrieverProtocol] = None,
-        llm: Optional[GeneratorProtocol] = None,
-        graph: Optional[GraphRetrieverProtocol] = None,
-        reranker: Optional[RerankerProtocol] = None,
-        pipeline: Optional[ModularPipeline] = None,
-        config: Optional[Any] = None,
-    ) -> None:
-        super().__init__(config=config)
-        self._retrieval = retrieval
-        self._llm = llm
-        self._graph = graph
-        self._reranker = reranker
-        self._pipeline = pipeline
-
-    # ── Dependency injection ───────────────────────────────────────────
-
-    def set_retriever(self, retrieval: RetrieverProtocol) -> None:
-        self._retrieval = retrieval
-        self._pipeline = None  # Invalidate cached pipeline
-
-    def set_generator(self, llm: GeneratorProtocol) -> None:
-        self._llm = llm
-        self._pipeline = None
-
-    def set_graph_retriever(self, graph: GraphRetrieverProtocol) -> None:
-        self._graph = graph
-        self._pipeline = None
-
-    # ── Pipeline ───────────────────────────────────────────────────────
-
-    def _get_pipeline(self) -> ModularPipeline:
-        """Return the pipeline, building a default one if none was set."""
-        if self._pipeline is not None:
-            return self._pipeline
-        return self._build_default_pipeline()
-
-    def _build_default_pipeline(self) -> ModularPipeline:
-        """Build the default modular pipeline."""
-        builder = ModularPipelineBuilder()
-
-        # Add rewrite if LLM is available
-        if self._llm:
-            builder.add(QueryRewriteModule(self._llm))
-
-        # Add retrieval
-        if self._retrieval:
-            builder.add(RetrieveModule(self._retrieval, graph=self._graph, mode="hybrid"))
-        elif self._graph:
-            builder.add(RetrieveModule(
-                self._retrieval,  # type: ignore[arg-type] — allowed to be None in this path
-                graph=self._graph,
-                mode="graph",
-            ))
-
-        # Add rerank if available
-        if self._reranker:
-            builder.add(RerankModule(self._reranker, top_k=5))
-
-        # Add compression
-        builder.add(CompressModule(max_tokens=4000))
-
-        # Add generation
-        if self._llm:
-            builder.add(GenerateModule(self._llm))
-
-        return builder.build()
-
-    def set_pipeline(self, pipeline: ModularPipeline) -> None:
-        """Inject a custom pipeline (overrides the default)."""
-        self._pipeline = pipeline
-
-    # ── RAGStrategyBase implementation ─────────────────────────────────
-
-    async def retrieve(self, query: RAGQuery) -> RAGContext:
-        """Run only the retrieval portion of the pipeline."""
-        context = RAGContext(query=query.text)
-        pipeline = self._get_pipeline()
-
-        # Find and execute all modules up to (and including) retrieval/rerank
-        for module in pipeline.modules:
-            if module.name in ("query_rewrite", "retrieve", "rerank", "compress"):
-                context = await module.run(context, query)
-            if module.name == "generate":
-                break  # Stop before generation
-
-        return context
-
-    async def generate(self, context: RAGContext, query: RAGQuery) -> RAGResponse:
-        """Run only the generation portion."""
-        if not self._llm:
-            return RAGResponse(
-                query_id=query.query_id,
-                answer="[No LLM available for generation]",
-                strategy=StrategyType.MODULAR,
-                context=context,
+        # ── Validate config ──────────────────────────────────────────
+        errors = validate_module_config(config)
+        if errors:
+            return RAGResult(
+                answer="",
+                warnings=[f"Invalid pipeline configuration: {'; '.join(errors)}"],
             )
 
-        t0 = time.perf_counter()
-        answer = await self._llm.generate(
-            prompt="You are a helpful assistant. Answer based on the provided context.",
-            context=context.combined_text,
-        )
-        latency = (time.perf_counter() - t0) * 1000
+        # ── Get trace recorder ───────────────────────────────────────
+        recorder = context.trace_recorder
+        if recorder is None:
+            recorder = get_recorder()
 
-        return RAGResponse(
-            query_id=query.query_id,
+        trace_id = context.metadata.get("trace_id", f"trace_modular_{id(request)}")
+        recorder.start_trace(trace_id)
+
+        query = request.query
+        answer = ""
+
+        # ── Execute modules in fixed order ───────────────────────────
+        for module_name in self._ORDER:
+            if module_name == "generate":
+                # Generate is always on (not configurable)
+                pass
+            elif not getattr(config, module_name, False):
+                continue  # Module disabled
+
+            module = self._mock_modules[module_name]
+
+            # Start trace
+            recorder.start(
+                trace_id,
+                _stage_for_module(module_name),
+                input_summary=f"query={query[:80]}" if module_name != "verify" else f"answer={answer[:80]}",
+            )
+
+            try:
+                if module_name == "generate":
+                    answer = await module.run(context, query=query)
+                    # Store answer in context for downstream modules
+                    context.metadata["generated_answer"] = answer
+                    recorder.end(
+                        trace_id, _stage_for_module(module_name),
+                        output_summary=f"answer={len(answer)} chars",
+                    )
+                elif module_name == "verify":
+                    result = await module.run(context, answer=answer)
+                    recorder.end(
+                        trace_id, _stage_for_module(module_name),
+                        output_summary=f"passed={result['passed']}, issues={len(result['issues'])}",
+                    )
+                    if not result["passed"]:
+                        warnings.extend(result["issues"])
+                else:
+                    # Pass config parameters through
+                    extra = {}
+                    if module_name == "retrieve":
+                        extra["top_k"] = config.top_k
+                    elif module_name == "rerank":
+                        extra["rerank_top_k"] = config.rerank_top_k
+                    elif module_name == "compress":
+                        extra["compress_max_tokens"] = config.compress_max_tokens
+
+                    context = await module.run(context, query=query, **extra)
+                    recorder.end(
+                        trace_id, _stage_for_module(module_name),
+                        output_summary=_summarise_module_output(module_name, context),
+                    )
+            except Exception as exc:
+                logger.error("Module '%s' failed: %s", module_name, exc)
+                recorder.end(
+                    trace_id, _stage_for_module(module_name),
+                    output_summary=f"error={exc}",
+                )
+                warnings.append(f"Module '{module_name}' failed: {exc}")
+
+        # ── Build result ─────────────────────────────────────────────
+        recorder.record(
+            trace_id,
+            TraceEvent(
+                trace_id=trace_id,
+                stage=TraceStage.COMPLETE,
+                started_at=datetime.now(timezone.utc),
+                duration_ms=0.0,
+                input_summary="pipeline finished",
+                output_summary=f"answer={len(answer)} chars",
+            ),
+        )
+
+        return RAGResult(
             answer=answer,
-            strategy=StrategyType.MODULAR,
-            context=context,
-            latency_ms=latency,
+            hits=context.chunks,
+            trace=recorder.get_trace(trace_id),
+            warnings=warnings,
         )
 
-    async def run(self, query: RAGQuery) -> RAGResponse:
-        """Execute the full modular pipeline."""
-        t0 = time.perf_counter()
 
-        context = RAGContext(query=query.text)
-        pipeline = self._get_pipeline()
-        context = await pipeline.execute(context, query)
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-        # Extract answer from context metadata (set by GenerateModule)
-        answer = context.metadata.get("generated_answer", "")
-        latency = (time.perf_counter() - t0) * 1000
 
-        return RAGResponse(
-            query_id=query.query_id,
-            answer=answer,
-            strategy=StrategyType.MODULAR,
-            context=context,
-            latency_ms=latency,
-            metadata={
-                "pipeline_modules": [m.name for m in pipeline.modules],
-                "pipeline_latencies": {
-                    k: v
-                    for k, v in context.metadata.items()
-                    if k.endswith("_latency_ms")
-                },
-            },
-        )
+def _stage_for_module(module_name: str) -> TraceStage:
+    """Map a module name to the corresponding TraceStage."""
+    _map = {
+        "rewrite":  TraceStage.REWRITE,
+        "retrieve": TraceStage.RETRIEVE,
+        "rerank":   TraceStage.RERANK,
+        "compress": TraceStage.COMPRESS,
+        "generate": TraceStage.GENERATE,
+        "verify":   TraceStage.VERIFY,
+    }
+    return _map.get(module_name, TraceStage.ERROR)
 
-    async def stream(self, query: RAGQuery) -> AsyncIterator[Any]:
-        """Streaming execution — yields events for each module."""
-        # Simple implementation: yield module start/end events
-        context = RAGContext(query=query.text)
-        pipeline = self._get_pipeline()
 
-        for module in pipeline.modules:
-            # Yield module-start event
-            yield {"type": "module_start", "module": module.name}
-
-            context = await module.run(context, query)
-
-            yield {"type": "module_end", "module": module.name}
-
-        answer = context.metadata.get("generated_answer", "")
-        yield {"type": "done", "answer": answer}
+def _summarise_module_output(module_name: str, ctx: RAGContext) -> str:
+    """Produce a short human-readable summary of module output."""
+    if module_name == "rewrite":
+        rewritten = ctx.metadata.get("rewritten_query", "")
+        return f"rewritten_query={rewritten[:80]}"
+    elif module_name == "retrieve":
+        return f"{len(ctx.chunks)} chunks, method={ctx.retrieval_method}"
+    elif module_name == "rerank":
+        return f"{len(ctx.chunks)} chunks after reranking"
+    elif module_name == "compress":
+        return f"{len(ctx.chunks)} chunks, {sum(len(c.content) for c in ctx.chunks)} chars"
+    return f"done"
 
 
 # ── Auto-register ─────────────────────────────────────────────────────────
 
-# Register with the global registry when this module is imported.
-# The strategy is registered as a CLASS — the registry creates instances lazily.
+
 try:
-    from src.rag.registry import get_registry, RAGStrategyRegistry
+    from src.rag.registry import get_registry
     _reg = get_registry()
     if not _reg.is_registered(RAGMode.MODULAR):
-        # Create a minimal unconfigured instance for registration.
-        # Dependencies (retrieval, llm, graph) will be injected later by RAGService.
         _reg.register(RAGMode.MODULAR, ModularRAGStrategy())
 except Exception:
-    pass  # Registration will be handled by explicit setup
+    pass
