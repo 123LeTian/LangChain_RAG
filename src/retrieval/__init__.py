@@ -22,6 +22,15 @@ from .multi_query import (
     retrieve_queries,
 )
 from .query_rewriter import QueryRewriter, QueryRewriterProtocol
+from .vector_tool import (
+    CToolResultAdapter,
+    InvalidToolArgumentsError,
+    VectorSearchExecutionError,
+    VectorSearchTool,
+    VectorSearchToolError,
+    register_vector_search_tool,
+    vector_search,
+)
 from .protocols import (
     KnowledgeRepository,
     RetrieverProtocol,
@@ -57,6 +66,13 @@ __all__ = [
     "QueryRetrievalReport",
     "merge_retrieval_hits",
     "retrieve_queries",
+    "CToolResultAdapter",
+    "InvalidToolArgumentsError",
+    "VectorSearchExecutionError",
+    "VectorSearchTool",
+    "VectorSearchToolError",
+    "register_vector_search_tool",
+    "vector_search",
     "KnowledgeRepository",
     "SimpleKnowledgeRepository",
 ]
