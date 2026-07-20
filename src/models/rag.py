@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -228,3 +228,293 @@ class RAGPipelineConfig(BaseModel):
     )
     agent_max_steps: int = Field(default=5, ge=1, le=20, description="Max agent reasoning steps")
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# C1 — 共享 RAG 数据契约 (Unified Data Contract)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+# ── RAGMode ────────────────────────────────────────────────────────────────
+
+
+class RAGMode(str, Enum):
+    """All five RAG paradigms available through the unified orchestration layer.
+
+    This enum complements StrategyType; it uses shorter value names and is the
+    preferred mode selector for the API-facing RAGRequest model.
+    """
+
+    NAIVE = "naive"
+    ADVANCED = "advanced"
+    MODULAR = "modular"
+    GRAPH = "graph"
+    AGENTIC = "agentic"
+
+    def to_strategy_type(self) -> StrategyType:
+        """Map RAGMode → StrategyType for internal strategy resolution."""
+        _map = {
+            RAGMode.NAIVE: StrategyType.NAIVE,
+            RAGMode.ADVANCED: StrategyType.ADVANCED,
+            RAGMode.MODULAR: StrategyType.MODULAR,
+            RAGMode.GRAPH: StrategyType.GRAPH_RAG,
+            RAGMode.AGENTIC: StrategyType.AGENTIC,
+        }
+        return _map[self]
+
+
+# ── TraceStage ─────────────────────────────────────────────────────────────
+
+
+class TraceStage(str, Enum):
+    """Well-defined stages in a RAG pipeline trace.
+
+    Each stage corresponds to a distinct processing step:
+      INTENT       — query intent analysis / routing decision
+      REWRITE      — query rewriting / expansion
+      RETRIEVE      — vector / hybrid / keyword retrieval
+      RERANK        — relevance re-scoring of candidates
+      COMPRESS      — context compression / summarization
+      GRAPH_SEARCH  — knowledge-graph traversal
+      TOOL_CALL     — agent tool invocation
+      GENERATE      — LLM answer generation
+      VERIFY        — answer verification / factuality check
+      COMPLETE      — pipeline finished successfully
+      ERROR         — pipeline terminated with error
+    """
+
+    INTENT = "intent"
+    REWRITE = "rewrite"
+    RETRIEVE = "retrieve"
+    RERANK = "rerank"
+    COMPRESS = "compress"
+    GRAPH_SEARCH = "graph_search"
+    TOOL_CALL = "tool_call"
+    GENERATE = "generate"
+    VERIFY = "verify"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+# ── RAGRequest ─────────────────────────────────────────────────────────────
+
+
+class RAGRequest(BaseModel):
+    """Unified request model for the RAG API.
+
+    This is the FastAPI-facing request body accepted by POST /api/chat.
+    It maps to the internal RAGQuery after validation.
+    """
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="User's natural-language query",
+        examples=["What is the capital of France?"],
+    )
+    kb_id: Optional[str] = Field(
+        default=None,
+        description="Knowledge base identifier; uses default KB if omitted",
+    )
+    mode: RAGMode = Field(
+        default=RAGMode.NAIVE,
+        description="Which RAG paradigm to use for this request",
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Conversation session identifier for multi-turn chat",
+    )
+    options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional options: top_k, filters, llm_model, etc.",
+        examples=[{"top_k": 10, "llm_model": "claude-sonnet-5"}],
+    )
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("Query must not be blank")
+        return stripped
+
+    def to_rag_query(self) -> RAGQuery:
+        """Convert this API request into an internal RAGQuery."""
+        top_k = self.options.get("top_k", 5)
+        filters = self.options.get("filters", {})
+        return RAGQuery(
+            text=self.query,
+            strategy=self.mode.to_strategy_type(),
+            top_k=min(max(top_k, 1), 100),
+            filters=filters,
+            conversation_id=self.session_id,
+            metadata={
+                "kb_id": self.kb_id,
+                "raw_options": self.options,
+            },
+        )
+
+
+# ── RAGResult ──────────────────────────────────────────────────────────────
+
+
+class RAGResult(BaseModel):
+    """Unified result model returned by the RAG API.
+
+    Aggregates the answer, supporting citations, retrieval hits, trace events,
+    token usage, and any non-fatal warnings.  Designed for direct FastAPI
+    response serialization (JSON-compatible).
+    """
+
+    answer: str = Field(
+        ...,
+        description="The generated answer text",
+        examples=["The capital of France is Paris."],
+    )
+    citations: List[RAGCitation] = Field(
+        default_factory=list,
+        description="Citations linking answer claims to source chunks",
+    )
+    hits: List[RAGChunk] = Field(
+        default_factory=list,
+        description="Top retrieval hits used as context for generation",
+    )
+    trace: List[TraceEvent] = Field(
+        default_factory=list,
+        description="Ordered trace events recording each pipeline stage",
+    )
+    usage: Dict[str, int] = Field(
+        default_factory=dict,
+        description="LLM token usage breakdown: prompt, completion, total",
+        examples=[{"prompt": 1200, "completion": 300, "total": 1500}],
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Non-fatal warnings (e.g. 'reranking skipped', 'graph unavailable')",
+    )
+
+    @classmethod
+    def from_rag_response(
+        cls,
+        response: RAGResponse,
+        *,
+        trace_events: Optional[List[TraceEvent]] = None,
+        warnings: Optional[List[str]] = None,
+    ) -> RAGResult:
+        """Build a RAGResult from an internal RAGResponse + trace data.
+
+        Args:
+            response: The RAGResponse produced by a strategy.
+            trace_events: Optional ordered list of TraceEvent records.
+            warnings: Optional non-fatal warnings collected during execution.
+
+        Returns:
+            A fully populated RAGResult ready for JSON serialization.
+        """
+        return cls(
+            answer=response.answer,
+            citations=response.citations,
+            hits=response.context.chunks if response.context else [],
+            trace=trace_events or [],
+            usage=response.token_usage,
+            warnings=warnings or [],
+        )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "answer": "The capital of France is Paris.",
+                "citations": [
+                    {
+                        "chunk_id": "chunk_a1b2c3d4e5f6",
+                        "document_id": "doc_paris_facts",
+                        "text_snippet": "Paris is the capital and most populous city of France.",
+                    }
+                ],
+                "hits": [
+                    {
+                        "chunk_id": "chunk_a1b2c3d4e5f6",
+                        "content": "Paris is the capital and most populous city of France...",
+                        "source": {
+                            "document_id": "doc_paris_facts",
+                            "chunk_index": 3,
+                            "title": "Paris Factsheet",
+                            "score": 0.92,
+                        },
+                    }
+                ],
+                "trace": [
+                    {
+                        "trace_id": "trace_abc123",
+                        "stage": "retrieve",
+                        "started_at": "2026-07-20T10:30:00Z",
+                        "duration_ms": 45.2,
+                        "input_summary": "What is the capital of France?",
+                        "output_summary": "Retrieved 5 chunks from vector index",
+                    }
+                ],
+                "usage": {"prompt": 1200, "completion": 300, "total": 1500},
+                "warnings": [],
+            }
+        }
+    }
+
+
+# ── TraceEvent (Pydantic model, API-facing) ────────────────────────────────
+
+
+class TraceEvent(BaseModel):
+    """A single trace event recording one pipeline stage.
+
+    This is the API-facing trace model (Pydantic) for JSON serialization.
+    It differs from the internal ``TraceEvent`` dataclass in ``src/rag/trace.py``
+    which is optimized for in-memory span-based observability.
+
+    Fields:
+        trace_id:   Unique identifier shared by all events in one request.
+        stage:      The pipeline stage this event records.
+        started_at: ISO-8601 UTC timestamp when the stage began.
+        duration_ms: Wall-clock duration of this stage in milliseconds.
+        input_summary:  Short human-readable summary of stage input.
+        output_summary: Short human-readable summary of stage output.
+    """
+
+    trace_id: str = Field(
+        ...,
+        description="Shared trace identifier for correlating events",
+    )
+    stage: TraceStage = Field(
+        ...,
+        description="Pipeline stage this event corresponds to",
+    )
+    started_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="UTC timestamp when this stage started",
+    )
+    duration_ms: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Wall-clock duration of this stage in milliseconds",
+    )
+    input_summary: str = Field(
+        default="",
+        description="Short human-readable summary of what entered this stage",
+    )
+    output_summary: str = Field(
+        default="",
+        description="Short human-readable summary of what this stage produced",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "trace_id": "trace_abc123def456",
+                "stage": "retrieve",
+                "started_at": "2026-07-20T10:30:00.123456Z",
+                "duration_ms": 45.2,
+                "input_summary": "query='What is the capital of France?', top_k=5",
+                "output_summary": "retrieved 5 chunks, total 2340 chars",
+            }
+        }
+    }
