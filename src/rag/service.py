@@ -1,51 +1,83 @@
 """
 RAG Service — Owner: C
-High-level service that orchestrates the full RAG pipeline: retrieval → augmentation → generation.
+Unified RAG orchestration entry point.
 
 Responsibilities:
-  - Strategy selection (explicit or auto-routed)
-  - Pipeline execution with tracing
-  - Graceful fallback on failure
-  - Streaming and non-streaming paths
+  - Accept a RAGRequest, return a RAGResult
+  - Create trace_id for observability
+  - Resolve strategy from registry by RAGMode
+  - Build execution context (inject retriever, LLM, tools, tracer, config)
+  - Invoke strategy.run(request, context)
+  - Catch and wrap exceptions as structured errors
+  - Support timeout and cancellation
+
+The service contains NO RAG algorithms — it delegates 100% to strategies.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+import uuid
+from typing import Any, Dict, List, Optional
 
 from src.models.rag import (
     RAGContext,
-    RAGPipelineConfig,
-    RAGQuery,
-    RAGResponse,
-    RAGStatus,
-    StrategyType,
-    StreamEvent,
-    StreamEventType,
+    RAGMode,
+    RAGRequest,
+    RAGResult,
+    TraceEvent,
+    TraceStage,
 )
 from src.rag.base import (
     GeneratorProtocol,
     GraphRetrieverProtocol,
-    RAGStrategyBase,
+    RAGStrategy,
     RetrieverProtocol,
 )
 from src.rag.registry import (
-    StrategyNotFoundError,
-    StrategyRegistry,
+    RAGStrategyRegistry,
+    StrategyNotRegisteredError,
     get_registry,
 )
-from src.rag.trace import (
-    SpanStatus,
-    Trace,
-    TraceContext,
-    TraceEventType,
-    TraceStore,
-    get_trace_store,
-)
+from src.rag.trace import TraceStore, get_trace_store
 
 logger = logging.getLogger(__name__)
+
+
+# ── Structured Error ──────────────────────────────────────────────────────
+
+
+class RAGServiceError(Exception):
+    """Base exception for RAGService-level errors."""
+
+
+class StrategyNotAvailableError(RAGServiceError):
+    """Raised when no strategy is registered for the requested mode."""
+
+    def __init__(self, mode: RAGMode) -> None:
+        self.mode = mode
+        super().__init__(f"No strategy available for mode '{mode.value}'")
+
+
+class ExecutionTimeoutError(RAGServiceError):
+    """Raised when strategy execution exceeds the configured timeout."""
+
+    def __init__(self, mode: RAGMode, timeout_s: float) -> None:
+        self.mode = mode
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"Strategy '{mode.value}' timed out after {timeout_s:.1f}s"
+        )
+
+
+class ExecutionCancelledError(RAGServiceError):
+    """Raised when strategy execution is explicitly cancelled."""
+
+    def __init__(self, mode: RAGMode) -> None:
+        self.mode = mode
+        super().__init__(f"Strategy '{mode.value}' execution was cancelled")
 
 
 # ── Service ───────────────────────────────────────────────────────────────
@@ -54,281 +86,260 @@ logger = logging.getLogger(__name__)
 class RAGService:
     """Unified RAG orchestration service.
 
-    This is the primary entry point that the API layer (Owner: A) calls.
-    It selects the appropriate strategy, executes the pipeline, records traces,
-    and handles fallback on failure.
+    This is THE entry point called by the API layer (Owner: A).
+    It owns the strategy registry, trace store, and dependency injection.
 
-    Usage:
+    Usage::
+
         service = RAGService(
-            retrieval=my_retriever,
-            llm=my_generator,
-            graph=my_graph_retriever,   # optional
+            retriever=my_retriever,
+            llm=my_llm,
+            graph=my_graph,          # optional
         )
-        response = await service.run(RAGQuery(text="What is RAG?", strategy=StrategyType.ADVANCED))
+        result = await service.run(RAGRequest(query="What is RAG?", mode=RAGMode.NAIVE))
     """
 
     def __init__(
         self,
-        retrieval: RetrieverProtocol,
+        retriever: RetrieverProtocol,
         llm: GeneratorProtocol,
         graph: Optional[GraphRetrieverProtocol] = None,
         *,
-        registry: Optional[StrategyRegistry] = None,
+        registry: Optional[RAGStrategyRegistry] = None,
         trace_store: Optional[TraceStore] = None,
-        default_strategy: StrategyType = StrategyType.NAIVE,
-        config: Optional[RAGPipelineConfig] = None,
+        default_timeout: float = 60.0,
+        tools: Optional[List[Any]] = None,
     ) -> None:
-        self._retrieval = retrieval
+        self._retriever = retriever
         self._llm = llm
         self._graph = graph
-        self._registry = registry or get_registry()
+        self._registry = registry if registry is not None else get_registry()
         self._trace_store = trace_store or get_trace_store()
-        self._default_strategy = default_strategy
-        self._config = config or RAGPipelineConfig()
+        self._default_timeout = default_timeout
+        self._tools = tools or []
 
     # ── Public API ─────────────────────────────────────────────────────
 
-    async def run(self, query: RAGQuery) -> RAGResponse:
-        """Execute the full RAG pipeline and return a response.
+    async def run(
+        self,
+        request: RAGRequest,
+        *,
+        timeout: Optional[float] = None,
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> RAGResult:
+        """Execute the full RAG pipeline and return a unified result.
+
+        Execution flow:
+            1. Create trace_id for observability
+            2. Resolve strategy from registry by request.mode
+            3. Build RAGContext (inject retriever, LLM, tools, tracer, config)
+            4. Call strategy.run(request, context)
+            5. Catch exceptions → structured error in RAGResult.warnings
+            6. Return RAGResult
 
         Args:
-            query: The user query with optional strategy selection.
+            request:      The user's query with mode selection and options.
+            timeout:      Maximum execution time in seconds.  If exceeded,
+                          raises :class:`ExecutionTimeoutError`.
+            cancel_event: An optional asyncio.Event.  Set this event to
+                          cancel execution mid-flight.
 
         Returns:
-            RAGResponse with answer, sources, trace_id, etc.
+            RAGResult with answer, citations, hits, trace, usage, warnings.
+
+        Raises:
+            StrategyNotAvailableError: If no strategy is registered for
+                                       *request.mode*.
+            ExecutionTimeoutError:     If *timeout* is exceeded.
+            ExecutionCancelledError:   If *cancel_event* is set.
         """
-        trace = Trace(query_id=query.query_id)
-        strategy_type = self._resolve_strategy(query)
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        trace_id = f"trace_{uuid.uuid4().hex[:16]}"
 
-        with TraceContext(trace, "pipeline") as pipeline_span:
-            pipeline_span.add_event(
-                TraceEventType.PIPELINE_START,
-                query=query.text,
-                strategy=strategy_type.value,
-            )
+        # ── 1. Validate mode ─────────────────────────────────────────
+        mode = request.mode
+        if not self._registry.is_registered(mode):
+            raise StrategyNotAvailableError(mode)
 
-            try:
-                strategy = self._get_strategy(strategy_type)
-                response = await strategy.run(query)
-                response.trace_id = trace.trace_id
-                pipeline_span.add_event(
-                    TraceEventType.PIPELINE_END,
-                    answer_len=len(response.answer),
-                    latency_ms=response.latency_ms,
-                )
-                self._trace_store.save(trace)
-                return response
+        # ── 2. Build execution context ───────────────────────────────
+        context = self._build_context(request, trace_id)
 
-            except Exception as exc:
-                logger.warning(
-                    "Strategy %s failed: %s. Attempting fallback.", strategy_type, exc
-                )
-                pipeline_span.fail(exc)
-                fallback_response = await self._execute_fallback(query, trace, exc)
-                self._trace_store.save(trace)
-                return fallback_response
+        # ── 3. Get strategy ──────────────────────────────────────────
+        strategy = self._registry.get(mode)
 
-    async def stream(self, query: RAGQuery) -> AsyncIterator[StreamEvent]:
-        """Streaming variant of run().
-
-        Yields StreamEvent objects as the pipeline progresses:
-        retrieval_start → SOURCE* → retrieval_end → GENERATION_START → TOKEN* → DONE.
-        """
-        trace = Trace(query_id=query.query_id)
-        strategy_type = self._resolve_strategy(query)
-
+        # ── 4. Execute with timeout + cancel support ─────────────────
         try:
-            strategy = self._get_strategy(strategy_type)
-        except StrategyNotFoundError:
-            yield StreamEvent(
-                event_type=StreamEventType.ERROR,
-                data={"message": "No strategy available"},
-                trace_id=trace.trace_id,
+            result = await self._execute_with_guard(
+                strategy, request, context,
+                timeout_s=effective_timeout,
+                cancel_event=cancel_event,
+                trace_id=trace_id,
             )
-            return
+            return result
+        except asyncio.TimeoutError:
+            raise ExecutionTimeoutError(mode, effective_timeout)
+        except asyncio.CancelledError:
+            raise ExecutionCancelledError(mode)
 
-        # Try streaming if the strategy supports it
-        stream_method = getattr(strategy, "stream", None)
-        if callable(stream_method):
-            try:
-                async for event in stream_method(query):
-                    event.trace_id = trace.trace_id
-                    yield event
-                    if event.event_type == StreamEventType.DONE:
-                        self._trace_store.save(trace)
-                        return
-            except Exception as exc:
-                logger.warning("Stream failed, falling back: %s", exc)
-                yield StreamEvent(
-                    event_type=StreamEventType.ERROR,
-                    data={"message": str(exc)},
-                    trace_id=trace.trace_id,
-                )
+    async def run_safe(
+        self,
+        request: RAGRequest,
+        *,
+        timeout: Optional[float] = None,
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> RAGResult:
+        """Like :meth:`run`, but NEVER raises.
 
-        # Non-streaming fallback
-        response = await self.run(query)
-        response.trace_id = trace.trace_id
-        if response.context:
-            for chunk in response.context.chunks:
-                yield StreamEvent(
-                    event_type=StreamEventType.SOURCE,
-                    data={"chunk_id": chunk.chunk_id, "content": chunk.content[:200]},
-                    trace_id=trace.trace_id,
-                )
-        yield StreamEvent(
-            event_type=StreamEventType.TOKEN,
-            data={"token": response.answer},
-            trace_id=trace.trace_id,
-        )
-        yield StreamEvent(
-            event_type=StreamEventType.DONE,
-            data={},
-            trace_id=trace.trace_id,
-        )
-        self._trace_store.save(trace)
+        All errors are captured and returned as a RAGResult with the error
+        in ``warnings`` and an empty answer.  Suitable for API handlers
+        that must always return a 200 response.
+        """
+        try:
+            return await self.run(
+                request, timeout=timeout, cancel_event=cancel_event
+            )
+        except StrategyNotAvailableError as exc:
+            return RAGResult(
+                answer="",
+                warnings=[f"StrategyNotAvailable: {exc}"],
+            )
+        except ExecutionTimeoutError as exc:
+            return RAGResult(
+                answer="",
+                warnings=[f"Timeout: {exc}"],
+            )
+        except ExecutionCancelledError as exc:
+            return RAGResult(
+                answer="",
+                warnings=[f"Cancelled: {exc}"],
+            )
+        except Exception as exc:
+            logger.exception("Unexpected error in RAG pipeline")
+            return RAGResult(
+                answer="",
+                warnings=[f"UnexpectedError: {type(exc).__name__}: {exc}"],
+            )
 
-    # ── Strategy management ────────────────────────────────────────────
+    # ── Strategy management ───────────────────────────────────────────
 
-    def register_strategy(
-        self, strategy_type: StrategyType, strategy_cls: type, **kwargs: Any
-    ) -> None:
-        """Register a strategy class at runtime."""
-        self._registry.register(strategy_type, strategy_cls, **kwargs)
+    def register(self, mode: RAGMode, strategy: Any) -> None:
+        """Register a strategy instance for *mode*."""
+        self._registry.register(mode, strategy)
 
-    def list_strategies(self) -> List[str]:
-        """Return names of all registered strategies."""
-        return self._registry.list_names()
+    def list_modes(self) -> List[RAGMode]:
+        """Return all registered RAGMode values."""
+        return self._registry.list_modes()
 
-    def set_default_strategy(self, strategy_type: StrategyType) -> None:
-        """Change the default strategy."""
-        self._default_strategy = strategy_type
-
-    # ── Trace access ───────────────────────────────────────────────────
-
-    def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve a trace by ID (for API)."""
-        trace = self._trace_store.get(trace_id)
-        return trace.to_dict() if trace else None
-
-    def list_traces(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """List recent traces (for API)."""
-        traces = self._trace_store.list_recent(limit)
-        return [t.to_dict() for t in traces]
+    def is_available(self, mode: RAGMode) -> bool:
+        """Check if a strategy is available for *mode*."""
+        return self._registry.is_registered(mode)
 
     # ── Internal ───────────────────────────────────────────────────────
 
-    def _resolve_strategy(self, query: RAGQuery) -> StrategyType:
-        """Determine which strategy to use.
+    def _build_context(
+        self, request: RAGRequest, trace_id: str
+    ) -> RAGContext:
+        """Build a RAGContext with all dependencies injected.
 
-        Priority: query.strategy > pipeline config > default.
+        Strategy reads dependencies from the context — never creates its own.
         """
-        if query.strategy:
-            return query.strategy
-        if self._config.strategy:
-            return self._config.strategy
-        return self._default_strategy
+        recorded_events: List[TraceEvent] = []
 
-    def _get_strategy(self, strategy_type: StrategyType) -> RAGStrategyBase:
-        """Get the strategy instance for the given type.
+        def trace_recorder(
+            stage: TraceStage,
+            input_summary: str,
+            output_summary: str,
+            duration_ms: float,
+        ) -> None:
+            recorded_events.append(
+                TraceEvent(
+                    trace_id=trace_id,
+                    stage=stage,
+                    input_summary=input_summary,
+                    output_summary=output_summary,
+                    duration_ms=duration_ms,
+                )
+            )
 
-        Injects the protocol dependencies that the strategy needs.
-        """
-        strategy = self._registry.get(strategy_type)
-
-        # Inject dependencies if the strategy supports it
-        if hasattr(strategy, "set_retriever"):
-            strategy.set_retriever(self._retrieval)
-        if hasattr(strategy, "set_generator"):
-            strategy.set_generator(self._llm)
-        if hasattr(strategy, "set_graph_retriever") and self._graph is not None:
-            strategy.set_graph_retriever(self._graph)
-
-        return strategy
-
-    async def _execute_fallback(
-        self,
-        query: RAGQuery,
-        trace: Trace,
-        original_error: Exception,
-    ) -> RAGResponse:
-        """Execute fallback chain: try alternative strategies in order."""
-        fallback_order = self._config.fallback_strategies or [
-            StrategyType.ADVANCED,
-            StrategyType.NAIVE,
-        ]
-
-        errors: List[str] = [f"{type(original_error).__name__}: {original_error}"]
-
-        for fb_type in fallback_order:
-            if fb_type == query.strategy:
-                continue  # Skip the one that already failed
-            if not self._registry.is_registered(fb_type):
-                continue
-
-            try:
-                with TraceContext(trace, f"fallback_{fb_type.value}") as fb_span:
-                    fb_span.add_event(
-                        TraceEventType.AGENT_FALLBACK,
-                        from_strategy=query.strategy.value,
-                        to_strategy=fb_type.value,
-                    )
-                    strategy = self._get_strategy(fb_type)
-                    response = await strategy.run(query)
-                    response.trace_id = trace.trace_id
-                    response.metadata["status"] = RAGStatus.PARTIAL.value
-                    response.metadata["fallback_from"] = query.strategy.value
-                    response.metadata["fallback_errors"] = errors
-                    response.error = (
-                        f"Primary strategy ({query.strategy.value}) failed. "
-                        f"Fell back to {fb_type.value}. Errors: {'; '.join(errors)}"
-                    )
-                    return response
-            except Exception as fb_exc:
-                errors.append(f"{fb_type.value}: {type(fb_exc).__name__}: {fb_exc}")
-                continue
-
-        # All fallbacks exhausted
-        return RAGResponse(
-            query_id=query.query_id,
-            answer="",
-            strategy=query.strategy,
-            error=f"All strategies exhausted. Errors: {'; '.join(errors)}",
-            trace_id=trace.trace_id,
+        return RAGContext(
+            query=request.query,
+            chunks=[],
+            retrieval_method="pending",
+            llm=self._llm,
+            retriever=self._retriever,
+            tools=list(self._tools),
+            trace_recorder=trace_recorder,
+            config=request.options,
+            metadata={
+                "trace_id": trace_id,
+                "mode": request.mode.value,
+                "session_id": request.session_id,
+                "kb_id": request.kb_id,
+            },
         )
 
+    async def _execute_with_guard(
+        self,
+        strategy: RAGStrategy,
+        request: RAGRequest,
+        context: RAGContext,
+        timeout_s: float,
+        cancel_event: Optional[asyncio.Event],
+        trace_id: str,
+    ) -> RAGResult:
+        """Execute the strategy with timeout and cancellation guards."""
+        async def _run() -> RAGResult:
+            return await strategy.run(request, context)
 
-# ── Factory ───────────────────────────────────────────────────────────────
+        task = asyncio.create_task(_run())
 
+        try:
+            if cancel_event is not None:
+                # Create a task for the cancel event waiter
+                cancel_task = asyncio.create_task(cancel_event.wait())
+                done, pending = await asyncio.wait(
+                    [task, cancel_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=timeout_s,
+                )
 
-def create_rag_service(
-    retrieval: RetrieverProtocol,
-    llm: GeneratorProtocol,
-    graph: Optional[GraphRetrieverProtocol] = None,
-    **kwargs: Any,
-) -> RAGService:
-    """Factory function: create a fully initialized RAGService.
+                if cancel_task.done() and cancel_event.is_set():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    raise asyncio.CancelledError(
+                        f"Execution cancelled for trace {trace_id}"
+                    )
 
-    Auto-discovers strategies from the strategies package.
+                if task not in done:
+                    # Timeout occurred
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                    raise asyncio.TimeoutError(
+                        f"Execution timed out after {timeout_s}s for trace {trace_id}"
+                    )
 
-    Args:
-        retrieval: Object conforming to RetrieverProtocol (from Owner: B).
-        llm: Object conforming to GeneratorProtocol (from Owner: A or B).
-        graph: Optional object conforming to GraphRetrieverProtocol (from Owner: D).
-        **kwargs: Passed to RAGService constructor.
+                # Clean up cancel task
+                if not cancel_task.done():
+                    cancel_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await cancel_task
 
-    Returns:
-        Configured RAGService ready to handle queries.
-    """
-    registry = kwargs.pop("registry", get_registry())
+            else:
+                result = await asyncio.wait_for(task, timeout=timeout_s)
 
-    # Auto-discover strategies
-    if len(registry) == 0:
-        registry.discover_all("src.rag.strategies")
+            return task.result()
 
-    return RAGService(
-        retrieval=retrieval,
-        llm=llm,
-        graph=graph,
-        registry=registry,
-        **kwargs,
-    )
+        except asyncio.CancelledError:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            raise
+        except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            raise

@@ -1,23 +1,20 @@
 """
 RAG Registry — Owner: C
-Strategy registry for dynamic lookup and plugin-style registration of RAG strategies.
+Strategy registry for managing RAGStrategy instances keyed by RAGMode.
 
 Supports:
-  - Manual registration via register()
-  - Decorator-based registration
-  - Auto-discovery of strategies in the strategies/ package
-  - Lazy initialization (strategies are instantiated on first use)
+  - Dynamic registration of pre-built RAGStrategy instances
+  - Singleton management (one strategy per RAGMode)
+  - Unregistered-mode exception handling
+  - Backward compatibility with StrategyType via RAGMode mapping
 """
 
 from __future__ import annotations
 
-import importlib
-import inspect
 import logging
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
 
-from src.models.rag import StrategyType
-from src.rag.base import RAGStrategyBase
+from src.models.rag import RAGMode
 
 logger = logging.getLogger(__name__)
 
@@ -26,285 +23,225 @@ logger = logging.getLogger(__name__)
 
 
 class RegistryError(Exception):
-    """Base exception for registry errors."""
+    """Base exception for all registry errors."""
 
 
-class StrategyNotFoundError(RegistryError):
-    """Raised when a requested strategy name is not registered."""
+class StrategyNotRegisteredError(RegistryError):
+    """Raised when requesting a strategy for an unregistered RAGMode."""
 
-    def __init__(self, name: str, available: List[str]) -> None:
+    def __init__(self, mode: RAGMode) -> None:
+        self.mode = mode
         super().__init__(
-            f"Strategy '{name}' not found. Available: {', '.join(available)}"
+            f"No strategy registered for mode '{mode.value}'. "
+            f"Available modes: [no strategies registered]"
         )
-        self.name = name
-        self.available = available
+
+    @classmethod
+    def with_available(cls, mode: RAGMode, available: List[str]) -> StrategyNotRegisteredError:
+        inst = cls.__new__(cls)
+        inst.mode = mode
+        inst.available = available
+        msg = (
+            f"No strategy registered for mode '{mode.value}'. "
+            f"Available: {', '.join(available) if available else '(none)'}"
+        )
+        super(StrategyNotRegisteredError, inst).__init__(msg)
+        return inst
 
 
 class StrategyAlreadyRegisteredError(RegistryError):
-    """Raised when attempting to register a duplicate strategy name."""
+    """Raised when attempting to register a mode that already has a strategy."""
 
-    def __init__(self, name: str) -> None:
-        super().__init__(f"Strategy '{name}' is already registered")
-        self.name = name
-
-
-# ── Entry ─────────────────────────────────────────────────────────────────
-
-
-class _StrategyEntry:
-    """Internal entry holding a strategy class and its (optionally lazy) instance."""
-
-    __slots__ = ("strategy_type", "cls", "instance", "config", "metadata")
-
-    def __init__(
-        self,
-        strategy_type: StrategyType,
-        cls: Type[RAGStrategyBase],
-        config: Optional[Any] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        self.strategy_type = strategy_type
-        self.cls = cls
-        self.instance: Optional[RAGStrategyBase] = None
-        self.config = config
-        self.metadata = metadata or {}
-
-    def get_instance(self) -> RAGStrategyBase:
-        """Return the singleton instance, creating it lazily if needed."""
-        if self.instance is None:
-            self.instance = self.cls(config=self.config)
-        return self.instance
+    def __init__(self, mode: RAGMode) -> None:
+        self.mode = mode
+        super().__init__(
+            f"Strategy already registered for mode '{mode.value}'. "
+            f"Use unregister() first or call replace()."
+        )
 
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
 
-class StrategyRegistry:
-    """Central registry for RAG strategies.
+class RAGStrategyRegistry:
+    """Central registry for RAGStrategy instances.
 
-    Strategies are keyed by their StrategyType enum value.
+    Strategies are keyed by :class:`RAGMode`.  Each mode holds exactly ONE
+    strategy instance (singleton per mode).  Instances are registered
+    pre-built — the registry does NOT create or configure strategies.
 
-    Usage:
-        registry = StrategyRegistry()
+    Usage::
 
-        # Manual registration
-        registry.register(StrategyType.NAIVE, NaiveRAG)
+        registry = RAGStrategyRegistry()
 
-        # Decorator registration
-        @registry.register(StrategyType.MODULAR)
-        class MyModularRAG(RAGStrategyBase):
+        # Register a pre-built strategy
+        registry.register(RAGMode.NAIVE, naive_strategy)
+
+        # Retrieve and execute
+        strategy = registry.get(RAGMode.NAIVE)
+        result = await strategy.run(request, context)
+
+        # Replace an existing strategy
+        registry.replace(RAGMode.NAIVE, new_strategy)
+
+        # Check availability
+        if registry.is_registered(RAGMode.GRAPH):
             ...
-
-        # Lookup
-        strategy = registry.get(StrategyType.NAIVE)
-        response = await strategy.run(query)
     """
 
     def __init__(self) -> None:
-        self._entries: Dict[str, _StrategyEntry] = {}
-        self._default_strategy: Optional[StrategyType] = None
+        self._strategies: Dict[RAGMode, Any] = {}  # RAGMode → RAGStrategy
 
     # ── Registration ──────────────────────────────────────────────────
 
-    def register(
-        self,
-        strategy_type: StrategyType,
-        cls: Optional[Type[RAGStrategyBase]] = None,
-        *,
-        config: Optional[Any] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        set_default: bool = False,
-    ) -> Callable[[Type[RAGStrategyBase]], Type[RAGStrategyBase]]:
-        """Register a strategy class.
-
-        Can be used as a direct call or as a decorator.
+    def register(self, mode: RAGMode, strategy: Any) -> None:
+        """Register a strategy instance for the given mode.
 
         Args:
-            strategy_type: Enum key for this strategy.
-            cls: The strategy class (when called directly).
-            config: Optional configuration passed to the constructor.
-            metadata: Arbitrary key-value metadata.
-            set_default: If True, make this the default strategy.
-
-        Returns:
-            Decorator when called without cls, otherwise the class unchanged.
+            mode:     The RAG paradigm this strategy implements.
+            strategy: A concrete RAGStrategy instance (must have ``mode``
+                      attribute matching *mode*).
 
         Raises:
-            StrategyAlreadyRegisteredError: If strategy_type is already registered.
-            TypeError: If cls does not subclass RAGStrategyBase.
+            StrategyAlreadyRegisteredError: If *mode* already has a strategy.
+                Use :meth:`replace` to overwrite.
+            ValueError: If *strategy.mode* does not match *mode*.
         """
-        key = strategy_type.value
+        if not isinstance(mode, RAGMode):
+            raise TypeError(f"mode must be a RAGMode, got {type(mode).__name__}")
 
-        def _register(c: Type[RAGStrategyBase]) -> Type[RAGStrategyBase]:
-            if not issubclass(c, RAGStrategyBase):
-                raise TypeError(
-                    f"{c.__name__} must subclass RAGStrategyBase"
-                )
-            if key in self._entries:
-                raise StrategyAlreadyRegisteredError(key)
-            self._entries[key] = _StrategyEntry(
-                strategy_type=strategy_type,
-                cls=c,
-                config=config,
-                metadata=metadata,
+        if mode in self._strategies:
+            raise StrategyAlreadyRegisteredError(mode)
+
+        # Validate that the strategy's mode matches
+        actual_mode = getattr(strategy, "mode", None)
+        if actual_mode is not None and actual_mode != mode:
+            raise ValueError(
+                f"Strategy mode mismatch: registry key={mode.value}, "
+                f"strategy.mode={actual_mode.value if isinstance(actual_mode, RAGMode) else actual_mode}"
             )
-            if set_default:
-                self._default_strategy = strategy_type
-            logger.info("Registered strategy: %s → %s", key, c.__name__)
-            return c
 
-        if cls is not None:
-            return _register(cls)
-        return _register
+        self._strategies[mode] = strategy
+        name = getattr(strategy, "strategy_name", strategy.__class__.__name__)
+        logger.info("Registered strategy: %s -> %s", mode.value, name)
+
+    def replace(self, mode: RAGMode, strategy: Any) -> None:
+        """Replace the strategy for *mode*, overwriting any existing one.
+
+        Unlike :meth:`register`, this does NOT raise if the mode is already
+        registered — it silently replaces.
+        """
+        self._strategies[mode] = strategy
+        name = getattr(strategy, "strategy_name", strategy.__class__.__name__)
+        logger.info("Replaced strategy: %s -> %s", mode.value, name)
+
+    def register_or_replace(self, mode: RAGMode, strategy: Any) -> None:
+        """Register if not present, otherwise replace."""
+        if mode in self._strategies:
+            self.replace(mode, strategy)
+        else:
+            self.register(mode, strategy)
 
     # ── Lookup ────────────────────────────────────────────────────────
 
-    def get(self, strategy_type: StrategyType) -> RAGStrategyBase:
-        """Return the singleton instance for the given strategy type.
+    def get(self, mode: RAGMode) -> Any:
+        """Return the strategy instance for *mode*.
 
         Args:
-            strategy_type: Enum key.
+            mode: The RAGMode to look up.
 
         Returns:
-            The strategy instance (created lazily on first access).
+            The registered RAGStrategy instance.
 
         Raises:
-            StrategyNotFoundError: If the strategy type is not registered.
+            StrategyNotRegisteredError: If *mode* is not registered.
         """
-        key = strategy_type.value
-        entry = self._entries.get(key)
-        if entry is None:
-            raise StrategyNotFoundError(key, self.list_names())
-        return entry.get_instance()
+        if not isinstance(mode, RAGMode):
+            raise TypeError(f"mode must be a RAGMode, got {type(mode).__name__}")
 
-    def get_default(self) -> RAGStrategyBase:
-        """Return the default strategy instance.
+        if mode not in self._strategies:
+            raise StrategyNotRegisteredError.with_available(
+                mode, self.list_modes_str()
+            )
+        return self._strategies[mode]
 
-        If no default was explicitly set, returns the first registered strategy.
-
-        Raises:
-            StrategyNotFoundError: If no strategies are registered at all.
-        """
-        if self._default_strategy is not None:
-            return self.get(self._default_strategy)
-        if not self._entries:
-            raise StrategyNotFoundError("<default>", [])
-        first_key = next(iter(self._entries))
-        return self._entries[first_key].get_instance()
+    def get_or_none(self, mode: RAGMode) -> Optional[Any]:
+        """Return the strategy for *mode*, or None if not registered."""
+        return self._strategies.get(mode)
 
     # ── Introspection ─────────────────────────────────────────────────
 
-    def list_names(self) -> List[str]:
-        """Return all registered strategy names."""
-        return list(self._entries.keys())
+    def is_registered(self, mode: RAGMode) -> bool:
+        """Check if a strategy is registered for *mode*."""
+        return mode in self._strategies
 
-    def list_types(self) -> List[StrategyType]:
-        """Return all registered strategy types."""
-        return [entry.strategy_type for entry in self._entries.values()]
+    def list_modes(self) -> List[RAGMode]:
+        """Return all registered RAGMode values."""
+        return list(self._strategies.keys())
 
-    def is_registered(self, strategy_type: StrategyType) -> bool:
-        """Check if a strategy type is registered."""
-        return strategy_type.value in self._entries
+    def list_modes_str(self) -> List[str]:
+        """Return registered mode names as strings (for error messages)."""
+        return [m.value for m in self._strategies]
 
-    def get_metadata(self, strategy_type: StrategyType) -> Dict[str, Any]:
-        """Return metadata for a registered strategy."""
-        entry = self._entries.get(strategy_type.value)
-        if entry is None:
-            raise StrategyNotFoundError(strategy_type.value, self.list_names())
-        return dict(entry.metadata)
+    @property
+    def registered_count(self) -> int:
+        """Number of registered strategies."""
+        return len(self._strategies)
 
     # ── Management ────────────────────────────────────────────────────
 
-    def unregister(self, strategy_type: StrategyType) -> None:
-        """Remove a strategy from the registry.
+    def unregister(self, mode: RAGMode) -> None:
+        """Remove the strategy for *mode*.
 
         Raises:
-            StrategyNotFoundError: If not registered.
+            StrategyNotRegisteredError: If *mode* is not registered.
         """
-        key = strategy_type.value
-        if key not in self._entries:
-            raise StrategyNotFoundError(key, self.list_names())
-        del self._entries[key]
-        if self._default_strategy == strategy_type:
-            self._default_strategy = None
-        logger.info("Unregistered strategy: %s", key)
-
-    def set_default(self, strategy_type: StrategyType) -> None:
-        """Set the default strategy (must already be registered)."""
-        if strategy_type.value not in self._entries:
-            raise StrategyNotFoundError(strategy_type.value, self.list_names())
-        self._default_strategy = strategy_type
+        if mode not in self._strategies:
+            raise StrategyNotRegisteredError.with_available(
+                mode, self.list_modes_str()
+            )
+        del self._strategies[mode]
+        logger.info("Unregistered strategy for mode: %s", mode.value)
 
     def clear(self) -> None:
-        """Remove all registered strategies."""
-        self._entries.clear()
-        self._default_strategy = None
+        """Remove ALL registered strategies."""
+        count = len(self._strategies)
+        self._strategies.clear()
+        logger.info("Cleared all %d registered strategies", count)
 
     def __len__(self) -> int:
-        return len(self._entries)
+        return len(self._strategies)
 
-    def __contains__(self, strategy_type: StrategyType) -> bool:
-        return self.is_registered(strategy_type)
-
-    # ── Auto-discovery ────────────────────────────────────────────────
-
-    def discover_all(self, package: str = "src.rag.strategies") -> int:
-        """Auto-discover and register all RAGStrategyBase subclasses in a package.
-
-        Scans the given package for classes that subclass RAGStrategyBase
-        and have a ``strategy_type`` attribute (the StrategyType enum value).
-
-        Args:
-            package: Dotted package path to scan.
-
-        Returns:
-            Number of newly discovered strategies registered.
-        """
-        try:
-            module = importlib.import_module(package)
-        except ImportError as exc:
-            logger.warning("Cannot auto-discover strategies from %s: %s", package, exc)
-            return 0
-
-        registered_count = 0
-        for name, obj in inspect.getmembers(module, inspect.isclass):
-            if not issubclass(obj, RAGStrategyBase) or obj is RAGStrategyBase:
-                continue
-            strategy_type = getattr(obj, "strategy_type", None)
-            if strategy_type is None:
-                continue
-            if not isinstance(strategy_type, StrategyType):
-                continue
-            if self.is_registered(strategy_type):
-                continue
-            try:
-                self.register(strategy_type, obj)
-                registered_count += 1
-            except RegistryError as exc:
-                logger.warning("Skipping %s: %s", name, exc)
-
-        if registered_count:
-            logger.info(
-                "Auto-discovered %d strategy(s) from %s", registered_count, package
-            )
-        return registered_count
+    def __contains__(self, mode: RAGMode) -> bool:
+        return self.is_registered(mode)
 
 
 # ── Global singleton ─────────────────────────────────────────────────────
 
+_default_registry: Optional[RAGStrategyRegistry] = None
 
-_default_registry: Optional[StrategyRegistry] = None
 
-
-def get_registry() -> StrategyRegistry:
-    """Return the global (process-level) strategy registry."""
+def get_registry() -> RAGStrategyRegistry:
+    """Return the global (process-level) RAGStrategyRegistry singleton."""
     global _default_registry
     if _default_registry is None:
-        _default_registry = StrategyRegistry()
+        _default_registry = RAGStrategyRegistry()
     return _default_registry
 
 
-def set_registry(registry: StrategyRegistry) -> None:
+def set_registry(registry: RAGStrategyRegistry) -> None:
     """Replace the global registry (e.g. for testing)."""
     global _default_registry
     _default_registry = registry
+
+
+# ── Backward compatibility aliases ───────────────────────────────────────
+
+# These aliases let existing code that imports StrategyRegistry,
+# StrategyNotFoundError, StrategyAlreadyRegisteredError continue to work.
+# They map to the new RAGMode-based equivalents.
+
+# Old name → new name
+StrategyRegistry = RAGStrategyRegistry  # type: ignore[misc]
+StrategyNotFoundError = StrategyNotRegisteredError  # type: ignore[misc]
+# StrategyAlreadyRegisteredError — same name, same behavior

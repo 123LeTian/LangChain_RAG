@@ -38,6 +38,7 @@ from src.models.rag import (
     RAGCitation,
     RAGContext,
     RAGChunk,
+    RAGMode,
     RAGQuery,
     RAGResponse,
     RAGSource,
@@ -49,7 +50,7 @@ from src.rag.base import (
     RAGStrategyBase,
     RetrieverProtocol,
 )
-from src.rag.registry import StrategyRegistry
+from src.rag.registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -368,21 +369,8 @@ class AgenticRAGStrategy(RAGStrategyBase):
 # ── Auto-register ─────────────────────────────────────────────────────────
 
 try:
-    registry = StrategyRegistry()
-    registry.register(
-        StrategyType.AGENTIC,
-        AgenticRAGStrategy,
-        metadata={
-            "description": "Agent-driven multi-step RAG with tool use and reasoning",
-            "paradigm": "Agentic",
-            "features": [
-                "multi_step_reasoning",
-                "tool_use",
-                "query_planning",
-                "self_reflection",
-                "fallback_degradation",
-            ],
-        },
-    )
+    _reg = get_registry()
+    if not _reg.is_registered(RAGMode.AGENTIC):
+        _reg.register(RAGMode.AGENTIC, AgenticRAGStrategy())
 except Exception:
-    pass  # Registration will be handled by auto-discovery
+    pass  # Registration will be handled by explicit setup

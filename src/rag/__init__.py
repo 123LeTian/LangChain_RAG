@@ -4,7 +4,7 @@
 #
 # Exports:
 #   - Strategy base class and interfaces
-#   - Strategy registry (global singleton + factory)
+#   - Strategy registry (global singleton)
 #   - RAG Service (main orchestration entry point)
 #   - Trace system (observability)
 #   - All strategies (via strategies/ package)
@@ -24,15 +24,19 @@ from src.rag.base import (
     RetrieverProtocol,
 )
 from src.rag.registry import (
+    RAGStrategyRegistry,
+    RegistryError,
     StrategyAlreadyRegisteredError,
-    StrategyNotFoundError,
-    StrategyRegistry,
+    StrategyNotRegisteredError,
     get_registry,
     set_registry,
 )
 from src.rag.service import (
+    ExecutionCancelledError,
+    ExecutionTimeoutError,
     RAGService,
-    create_rag_service,
+    RAGServiceError,
+    StrategyNotAvailableError,
 )
 from src.rag.trace import (
     SpanStatus,
@@ -56,14 +60,18 @@ __all__ = [
     "RerankerProtocol",
     "EmbedderProtocol",
     # Registry
-    "StrategyRegistry",
-    "StrategyNotFoundError",
+    "RAGStrategyRegistry",
+    "RegistryError",
+    "StrategyNotRegisteredError",
     "StrategyAlreadyRegisteredError",
     "get_registry",
     "set_registry",
     # Service
     "RAGService",
-    "create_rag_service",
+    "RAGServiceError",
+    "StrategyNotAvailableError",
+    "ExecutionTimeoutError",
+    "ExecutionCancelledError",
     "StreamEvent",
     "StreamEventType",
     "RAGStatus",

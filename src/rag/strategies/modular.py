@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from src.models.rag import (
     RAGChunk,
     RAGContext,
+    RAGMode,
     RAGQuery,
     RAGResponse,
     RAGSource,
@@ -35,7 +36,6 @@ from src.rag.base import (
     RerankerProtocol,
     RetrieverProtocol,
 )
-from src.rag.registry import StrategyRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -521,16 +521,14 @@ class ModularRAGStrategy(RAGStrategyBase):
 
 # ── Auto-register ─────────────────────────────────────────────────────────
 
-# Register with the global registry (safe to call multiple times — overwrites)
+# Register with the global registry when this module is imported.
+# The strategy is registered as a CLASS — the registry creates instances lazily.
 try:
-    registry = StrategyRegistry()
-    registry.register(
-        StrategyType.MODULAR,
-        ModularRAGStrategy,
-        metadata={
-            "description": "Composable RAG pipeline built from swappable modules",
-            "paradigm": "Modular",
-        },
-    )
+    from src.rag.registry import get_registry, RAGStrategyRegistry
+    _reg = get_registry()
+    if not _reg.is_registered(RAGMode.MODULAR):
+        # Create a minimal unconfigured instance for registration.
+        # Dependencies (retrieval, llm, graph) will be injected later by RAGService.
+        _reg.register(RAGMode.MODULAR, ModularRAGStrategy())
 except Exception:
-    pass  # Registration will be handled by auto-discovery
+    pass  # Registration will be handled by explicit setup

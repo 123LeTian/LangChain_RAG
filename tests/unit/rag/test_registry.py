@@ -1,14 +1,15 @@
 """
-Tests for src/rag/registry.py — StrategyRegistry.
+Tests for src/rag/registry.py — RAGStrategyRegistry (C3).
 """
 
 import pytest
 
-from src.models.rag import StrategyType, RAGQuery, RAGContext, RAGResponse
-from src.rag.base import RAGStrategyBase
+from src.models.rag import RAGMode, RAGContext, RAGRequest, RAGResult
+from src.rag.base import RAGStrategy
 from src.rag.registry import (
-    StrategyRegistry,
-    StrategyNotFoundError,
+    RAGStrategyRegistry,
+    RegistryError,
+    StrategyNotRegisteredError,
     StrategyAlreadyRegisteredError,
     get_registry,
     set_registry,
@@ -18,166 +19,140 @@ from src.rag.registry import (
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _make_strategy(name: str, stype: StrategyType) -> type:
-    """Factory: create a minimal strategy class for testing."""
+def _make_strategy(strategy_mode: RAGMode, name: str = "Test") -> RAGStrategy:
+    """Factory: create a minimal RAGStrategy instance for testing."""
 
-    class _S(RAGStrategyBase):
-        strategy_type = stype
+    class _S(RAGStrategy):
+        mode = strategy_mode
 
-        async def retrieve(self, query: RAGQuery) -> RAGContext:
-            return RAGContext(query=query.text)
+        async def run(self, request: RAGRequest, context: RAGContext) -> RAGResult:
+            return RAGResult(answer=f"answer from {name}")
 
-        async def generate(self, context: RAGContext, query: RAGQuery) -> RAGResponse:
-            return RAGResponse(
-                query_id=query.query_id, answer=name, strategy=stype
-            )
-
-        async def run(self, query: RAGQuery) -> RAGResponse:
-            return RAGResponse(
-                query_id=query.query_id, answer=name, strategy=stype
-            )
-
-    _S.__name__ = name
-    _S.__qualname__ = name
-    return _S
+    _s = _S()
+    _s.__class__.__name__ = name
+    return _s
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
-class TestStrategyRegistry:
-    """Tests for the strategy registry."""
+class TestRAGStrategyRegistry:
+    """Tests for the RAGStrategyRegistry (RAGMode-keyed, instance-based)."""
 
     def setup_method(self):
-        self.registry = StrategyRegistry()
+        self.registry = RAGStrategyRegistry()
+
+    # ── Registration ─────────────────────────────────────────────────
 
     def test_register_and_get(self):
-        Cls = _make_strategy("TestNaive", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        assert self.registry.is_registered(StrategyType.NAIVE)
+        strat = _make_strategy(RAGMode.NAIVE, "Naive")
+        self.registry.register(RAGMode.NAIVE, strat)
+        assert self.registry.is_registered(RAGMode.NAIVE)
 
-        strategy = self.registry.get(StrategyType.NAIVE)
-        assert strategy.strategy_type == StrategyType.NAIVE
+        got = self.registry.get(RAGMode.NAIVE)
+        assert got is strat
 
     def test_register_duplicate_raises(self):
-        Cls = _make_strategy("TestNaive", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE, "S1"))
         with pytest.raises(StrategyAlreadyRegisteredError):
-            self.registry.register(StrategyType.NAIVE, Cls)
+            self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE, "S2"))
+
+    def test_register_mode_mismatch_raises(self):
+        strat = _make_strategy(RAGMode.NAIVE)
+        with pytest.raises(ValueError, match="mode mismatch"):
+            self.registry.register(RAGMode.AGENTIC, strat)
+
+    def test_register_invalid_type_raises(self):
+        with pytest.raises(TypeError, match="RAGMode"):
+            self.registry.register("naive", _make_strategy(RAGMode.NAIVE))
+
+    def test_replace_overwrites(self):
+        s1 = _make_strategy(RAGMode.NAIVE, "v1")
+        s2 = _make_strategy(RAGMode.NAIVE, "v2")
+        self.registry.register(RAGMode.NAIVE, s1)
+        self.registry.replace(RAGMode.NAIVE, s2)
+        assert self.registry.get(RAGMode.NAIVE) is s2
+
+    def test_register_or_replace(self):
+        s1 = _make_strategy(RAGMode.NAIVE, "v1")
+        s2 = _make_strategy(RAGMode.NAIVE, "v2")
+        self.registry.register_or_replace(RAGMode.NAIVE, s1)
+        self.registry.register_or_replace(RAGMode.NAIVE, s2)
+        assert self.registry.get(RAGMode.NAIVE) is s2
+
+    # ── Lookup ────────────────────────────────────────────────────────
 
     def test_get_unregistered_raises(self):
-        with pytest.raises(StrategyNotFoundError) as exc:
-            self.registry.get(StrategyType.NAIVE)
-        assert "naive" in str(exc.value)
+        with pytest.raises(StrategyNotRegisteredError) as exc:
+            self.registry.get(RAGMode.ADVANCED)
+        assert "advanced" in str(exc.value)
 
-    def test_list_names(self):
-        Cls1 = _make_strategy("S1", StrategyType.NAIVE)
-        Cls2 = _make_strategy("S2", StrategyType.MODULAR)
-        self.registry.register(StrategyType.NAIVE, Cls1)
-        self.registry.register(StrategyType.MODULAR, Cls2)
-        names = self.registry.list_names()
+    def test_get_or_none_returns_none(self):
+        assert self.registry.get_or_none(RAGMode.GRAPH) is None
+
+    def test_get_or_none_returns_strategy(self):
+        strat = _make_strategy(RAGMode.MODULAR)
+        self.registry.register(RAGMode.MODULAR, strat)
+        assert self.registry.get_or_none(RAGMode.MODULAR) is strat
+
+    # ── Introspection ─────────────────────────────────────────────────
+
+    def test_list_modes(self):
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        self.registry.register(RAGMode.MODULAR, _make_strategy(RAGMode.MODULAR))
+        modes = self.registry.list_modes()
+        assert RAGMode.NAIVE in modes
+        assert RAGMode.MODULAR in modes
+        assert len(modes) == 2
+
+    def test_list_modes_str(self):
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        names = self.registry.list_modes_str()
         assert "naive" in names
-        assert "modular" in names
-        assert len(names) == 2
 
-    def test_list_types(self):
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        types = self.registry.list_types()
-        assert StrategyType.NAIVE in types
-
-    def test_default_strategy_explicit(self):
-        Cls = _make_strategy("S_Naive", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls, set_default=True)
-        default = self.registry.get_default()
-        assert default.strategy_type == StrategyType.NAIVE
-
-    def test_default_strategy_first_registered(self):
-        Cls = _make_strategy("S_Modular", StrategyType.MODULAR)
-        self.registry.register(StrategyType.MODULAR, Cls)
-        default = self.registry.get_default()
-        assert default.strategy_type == StrategyType.MODULAR
-
-    def test_unregister(self):
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        assert len(self.registry) == 1
-        self.registry.unregister(StrategyType.NAIVE)
-        assert len(self.registry) == 0
-        assert not self.registry.is_registered(StrategyType.NAIVE)
-
-    def test_unregister_unregistered_raises(self):
-        with pytest.raises(StrategyNotFoundError):
-            self.registry.unregister(StrategyType.NAIVE)
-
-    def test_set_default(self):
-        Cls1 = _make_strategy("S1", StrategyType.NAIVE)
-        Cls2 = _make_strategy("S2", StrategyType.MODULAR)
-        self.registry.register(StrategyType.NAIVE, Cls1)
-        self.registry.register(StrategyType.MODULAR, Cls2)
-        self.registry.set_default(StrategyType.MODULAR)
-        default = self.registry.get_default()
-        assert default.strategy_type == StrategyType.MODULAR
-
-    def test_set_default_unregistered_raises(self):
-        with pytest.raises(StrategyNotFoundError):
-            self.registry.set_default(StrategyType.NAIVE)
-
-    def test_clear(self):
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        self.registry.clear()
-        assert len(self.registry) == 0
+    def test_registered_count(self):
+        assert self.registry.registered_count == 0
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        assert self.registry.registered_count == 1
 
     def test_contains(self):
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        assert StrategyType.NAIVE in self.registry
-        assert StrategyType.AGENTIC not in self.registry
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        assert RAGMode.NAIVE in self.registry
+        assert RAGMode.GRAPH not in self.registry
 
-    def test_decorator_registration(self):
-        registry = StrategyRegistry()
+    # ── Management ────────────────────────────────────────────────────
 
-        @registry.register(StrategyType.MODULAR)
-        class DecoratedStrategy(RAGStrategyBase):
-            strategy_type = StrategyType.MODULAR
+    def test_unregister(self):
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        assert len(self.registry) == 1
+        self.registry.unregister(RAGMode.NAIVE)
+        assert len(self.registry) == 0
+        assert not self.registry.is_registered(RAGMode.NAIVE)
 
-            async def retrieve(self, query): pass
-            async def generate(self, context, query): pass
-            async def run(self, query): pass
+    def test_unregister_unregistered_raises(self):
+        with pytest.raises(StrategyNotRegisteredError):
+            self.registry.unregister(RAGMode.AGENTIC)
 
-        assert registry.is_registered(StrategyType.MODULAR)
+    def test_clear(self):
+        self.registry.register(RAGMode.NAIVE, _make_strategy(RAGMode.NAIVE))
+        self.registry.register(RAGMode.MODULAR, _make_strategy(RAGMode.MODULAR))
+        self.registry.clear()
+        assert self.registry.registered_count == 0
 
-    def test_register_non_subclass_raises(self):
-        with pytest.raises(TypeError):
-            self.registry.register(StrategyType.NAIVE, dict)  # type: ignore[arg-type]
-
-    def test_get_metadata(self):
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(
-            StrategyType.NAIVE, Cls,
-            metadata={"version": "1.0", "author": "C"},
-        )
-        meta = self.registry.get_metadata(StrategyType.NAIVE)
-        assert meta["version"] == "1.0"
-        assert meta["author"] == "C"
-
-    def test_lazy_instance(self):
-        """Verify that instances are created lazily on first get()."""
-        Cls = _make_strategy("S", StrategyType.NAIVE)
-        self.registry.register(StrategyType.NAIVE, Cls)
-        instance1 = self.registry.get(StrategyType.NAIVE)
-        instance2 = self.registry.get(StrategyType.NAIVE)
-        # Same singleton instance
-        assert instance1 is instance2
+    def test_all_five_modes(self):
+        """Can register all five RAG paradigms."""
+        for mode in RAGMode:
+            self.registry.register(mode, _make_strategy(mode))
+        assert self.registry.registered_count == 5
+        for mode in RAGMode:
+            assert self.registry.is_registered(mode)
 
 
 class TestGlobalRegistry:
     """Tests for the global registry singleton."""
 
     def teardown_method(self):
-        # Reset global registry after each test
-        set_registry(StrategyRegistry())
+        set_registry(RAGStrategyRegistry())
 
     def test_get_registry_returns_singleton(self):
         r1 = get_registry()
@@ -186,7 +161,7 @@ class TestGlobalRegistry:
 
     def test_set_registry_replaces(self):
         old = get_registry()
-        new = StrategyRegistry()
+        new = RAGStrategyRegistry()
         set_registry(new)
         assert get_registry() is new
         assert get_registry() is not old
