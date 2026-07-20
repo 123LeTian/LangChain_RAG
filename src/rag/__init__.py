@@ -18,6 +18,7 @@ from src.rag.base import (
     EmbedderProtocol,
     GeneratorProtocol,
     GraphRetrieverProtocol,
+    RAGStrategy,
     RAGStrategyBase,
     RerankerProtocol,
     RetrieverProtocol,
@@ -47,6 +48,7 @@ from src.rag.trace import (
 
 __all__ = [
     # Base
+    "RAGStrategy",
     "RAGStrategyBase",
     "RetrieverProtocol",
     "GeneratorProtocol",

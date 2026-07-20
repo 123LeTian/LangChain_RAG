@@ -79,7 +79,15 @@ class RAGChunk(BaseModel):
 
 
 class RAGContext(BaseModel):
-    """Collection of retrieved chunks forming the augmentation context."""
+    """Collection of retrieved chunks forming the augmentation context.
+
+    Also serves as the dependency-injection container for strategy execution.
+    Runtime dependencies (llm, retriever, tools, trace_recorder, config) are
+    injected here so that strategies never create their own infrastructure.
+    These fields are excluded from JSON serialization.
+    """
+
+    # ── Data fields (serialized) ────────────────────────────────────────
 
     chunks: List[RAGChunk] = Field(default_factory=list, description="Retrieved chunks")
     query: str = Field(..., description="The query that produced this context")
@@ -91,6 +99,41 @@ class RAGContext(BaseModel):
     )
     total_candidates: int = Field(default=0, description="Candidates before filtering/reranking")
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # ── Dependency-injection fields (NOT serialized) ────────────────────
+
+    llm: Any = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="LLM generator conforming to GeneratorProtocol",
+    )
+    retriever: Any = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Retriever conforming to RetrieverProtocol",
+    )
+    tools: List[Any] = Field(
+        default_factory=list,
+        exclude=True,
+        repr=False,
+        description="Available tools (BaseTool instances) for agentic strategies",
+    )
+    trace_recorder: Any = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Callable[[TraceStage, str, str, float], None] for recording trace events",
+    )
+    config: Dict[str, Any] = Field(
+        default_factory=dict,
+        exclude=True,
+        repr=False,
+        description="Strategy-level configuration overrides",
+    )
+
+    model_config = {"arbitrary_types_allowed": True}
 
     @property
     def combined_text(self) -> str:
