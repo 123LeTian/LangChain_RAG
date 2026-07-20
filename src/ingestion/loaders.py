@@ -5,6 +5,14 @@ from .base import BaseLoader
 from .models import DocumentRecord
 
 
+def _first_markdown_heading(text: str) -> str:
+    for line in text.splitlines():
+        match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if match:
+            return match.group(1)
+    return ""
+
+
 class TextLoader(BaseLoader):
     """加载 TXT 文件。"""
 
@@ -28,7 +36,11 @@ class TextLoader(BaseLoader):
             file_type="txt",
             text=text,
             checksum=checksum,
-            metadata={"file_size": len(content_bytes)},
+            metadata={
+                "file_size": len(content_bytes),
+                "filename": file_path.name,
+                "source": file_path.name,
+            },
         )
 
 
@@ -54,7 +66,12 @@ class MarkdownLoader(BaseLoader):
             file_type="markdown",
             text=text,
             checksum=checksum,
-            metadata={"file_size": len(content_bytes)},
+            metadata={
+                "file_size": len(content_bytes),
+                "filename": file_path.name,
+                "source": file_path.name,
+                "section": _first_markdown_heading(text),
+            },
         )
 
 
@@ -94,7 +111,13 @@ class PDFLoader(BaseLoader):
             file_type="pdf",
             text=text,
             checksum=checksum,
-            metadata={"file_size": len(content_bytes), "page_count": len(reader.pages)},
+            metadata={
+                "file_size": len(content_bytes),
+                "filename": file_path.name,
+                "source": file_path.name,
+                "page": 1,
+                "page_count": len(reader.pages),
+            },
         )
 
 
@@ -116,6 +139,16 @@ class DocxLoader(BaseLoader):
         doc = Document(str(file_path))
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
         text = "\n\n".join(paragraphs)
+        heading = next(
+            (
+                paragraph.text
+                for paragraph in doc.paragraphs
+                if paragraph.text.strip()
+                and paragraph.style is not None
+                and paragraph.style.name.lower().startswith("heading")
+            ),
+            "",
+        )
 
         return DocumentRecord(
             id=document_id,
@@ -124,7 +157,12 @@ class DocxLoader(BaseLoader):
             file_type="docx",
             text=text,
             checksum=checksum,
-            metadata={"file_size": len(content_bytes)},
+            metadata={
+                "file_size": len(content_bytes),
+                "filename": file_path.name,
+                "source": file_path.name,
+                "section": heading,
+            },
         )
 
 
