@@ -23,6 +23,7 @@ load_env(str(PROJECT_ROOT / ".env"))
 from src.ingestion import LoaderFactory
 from src.ingestion.splitter import split_documents
 from src.models.schemas import ChunkRecord
+from src.rag.naive_support import build_naive_prompt
 from src.retrieval import (
     HuggingFaceEmbedder, InMemoryVectorIndex, Retriever,
     SimpleReranker, ContextCompressor, CitationBuilder,
@@ -99,15 +100,7 @@ def rag_query(llm, retriever, reranker, compressor, citation_builder, query, top
     citation_text = citation_builder.format_citations(citations)
 
     # 6. LLM 生成
-    prompt = f"""请基于以下资料回答问题。如果资料中没有相关信息，请说明"根据已有资料无法回答该问题"。
-回答时请标注引用编号，例如[片段1]。
-
-参考资料：
-{context}
-
-问题：{query}
-
-请用中文回答："""
+    prompt = build_naive_prompt(query, context)
 
     print("  正在调用 DeepSeek 生成回答...")
     response = llm.invoke(prompt)
