@@ -26,6 +26,46 @@ class BaseEmbedder(ABC):
         return self.embed_texts([query])[0]
 
 
+class HuggingFaceEmbedder(BaseEmbedder):
+    """HuggingFace 本地向量化器（中文推荐 bge-small-zh-v1.5）。
+    首次运行自动下载模型，之后纯本地推理。
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+        self._model_name = model_name
+        self._model = None
+        self._dim = 512
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    def _get_model(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                raise ImportError("请安装: pip install sentence-transformers")
+            print(f"  正在加载 Embedding 模型 {self._model_name}...")
+            self._model = SentenceTransformer(self._model_name)
+            self._dim = self._model.get_sentence_embedding_dimension()
+            print(f"  模型加载完成，维度: {self._dim}")
+        return self._model
+
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        model = self._get_model()
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        return embeddings.tolist()
+
+    def embed_query(self, query: str) -> List[float]:
+        model = self._get_model()
+        embedding = model.encode([query], normalize_embeddings=True)
+        return embedding[0].tolist()
+
 class HashEmbedder(BaseEmbedder):
     """哈希向量器（无需外部依赖，仅用于测试和演示）。
     生产环境请用 OpenAIEmbedder 或 HuggingFaceEmbedder。
@@ -91,3 +131,45 @@ class OpenAIEmbedder(BaseEmbedder):
         resp = client.embeddings.create(model=self._model, input=texts)
         self._dim = len(resp.data[0].embedding)
         return [d.embedding for d in resp.data]
+
+
+class HuggingFaceEmbedder(BaseEmbedder):
+    """HuggingFace 本地向量化器（推荐中文用 bge-small-zh）。
+    首次运行会自动下载模型，之后纯本地推理，不调 API。
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+        self._model_name = model_name
+        self._model = None
+        self._dim = 512
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    def _get_model(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                raise ImportError("请安装: pip install sentence-transformers")
+            print(f"  正在加载 Embedding 模型 {self._model_name}（首次需下载）...")
+            self._model = SentenceTransformer(self._model_name)
+            self._dim = self._model.get_sentence_embedding_dimension()
+            print(f"  模型加载完成，维度: {self._dim}")
+        return self._model
+
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        model = self._get_model()
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        return embeddings.tolist()
+
+    def embed_query(self, query: str) -> List[float]:
+        model = self._get_model()
+        embedding = model.encode([query], normalize_embeddings=True)
+        return embedding[0].tolist()
+

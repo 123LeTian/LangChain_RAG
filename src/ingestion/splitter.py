@@ -1,4 +1,4 @@
-﻿"""Utilities for splitting loaded documents into retrieval-sized chunks.
+"""Utilities for splitting loaded documents into retrieval-sized chunks.
 
 The loaders in this project return :class:`DocumentRecord` instances, while
 downstream LangChain integrations generally use ``langchain_core.Document``.
@@ -17,7 +17,11 @@ from .models import DocumentRecord
 
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
-DEFAULT_SEPARATORS = [\
+<<<<<<< HEAD
+DEFAULT_SEPARATORS = ["\n\n", "\n", "\u3002", "\uff0c", "\uff1f", "\uff01", "\uff1b", " ", ""]
+=======
+DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
+>>>>>>> 9809988b04f1e98081fdcb0a83d52a85d9021022
 
 DocumentInput = Union[DocumentRecord, Document]
 DocumentInputs = Union[DocumentInput, Iterable[DocumentInput]]
@@ -177,4 +181,3 @@ __all__ = [
     "split_document",
     "split_documents",
 ]
-
