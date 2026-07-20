@@ -322,3 +322,246 @@ def set_trace_store(store: TraceStore) -> None:
     """Replace the global trace store (e.g. for testing or custom backends)."""
     global _default_trace_store
     _default_trace_store = store
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TraceRecorder — Stage-level pipeline tracing (Pydantic TraceEvent)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TraceRecorder:
+    """Records RAG pipeline execution as ordered stage-level :class:`TraceEvent` s.
+
+    Each event captures:
+      - ``trace_id``    — shared identifier for correlation
+      - ``stage``        — :class:`TraceStage` enum value
+      - ``started_at``   — UTC timestamp when the stage began
+      - ``duration_ms``  — wall-clock duration computed from ``start()`` / ``end()``
+      - ``input_summary``  — short human-readable input description
+      - ``output_summary`` — short human-readable output description
+
+    Designed for three use-cases:
+      1. **SSE real-time output** — subscribe a callback; fired on every ``end()``.
+      2. **Frontend trace timeline** — ``get_trace()`` returns ordered events.
+      3. **Evaluation** — full event history for metric computation.
+
+    Usage::
+
+        recorder = TraceRecorder()
+
+        # Start a trace
+        recorder.start_trace("trace_001")
+
+        # Record stages
+        recorder.start("trace_001", TraceStage.RETRIEVE, "query=What is RAG?")
+        # ... do work ...
+        event = recorder.end("trace_001", TraceStage.RETRIEVE, "retrieved 5 chunks")
+
+        recorder.start("trace_001", TraceStage.GENERATE, "context=5 chunks")
+        # ... do work ...
+        event = recorder.end("trace_001", TraceStage.GENERATE, "answer=42 chars")
+
+        # Retrieve trace
+        events = recorder.get_trace("trace_001")
+        for evt in events:
+            print(f"{evt.stage.value}: {evt.duration_ms:.1f}ms")
+    """
+
+    def __init__(self) -> None:
+        # trace_id → ordered list of completed TraceEvent
+        self._traces: Dict[str, List[Any]] = {}
+        # (trace_id, stage) → (started_at_float, input_summary)
+        self._active_spans: Dict[tuple, tuple[float, str]] = {}
+        # Callbacks for real-time event streaming (SSE)
+        self._subscribers: List[Callable[[Any], None]] = []
+
+    # ── Trace lifecycle ──────────────────────────────────────────────────
+
+    def start_trace(self, trace_id: str) -> None:
+        """Initialise storage for a new trace.
+
+        Args:
+            trace_id: Unique identifier shared by all events in this request.
+        """
+        if trace_id not in self._traces:
+            self._traces[trace_id] = []
+
+    def end_trace(self, trace_id: str) -> None:
+        """Mark a trace as complete.  No more events will be added.
+
+        Any unclosed spans are closed automatically with a warning summary.
+        """
+        # Auto-close any unclosed spans
+        for (tid, stage), (started, input_sum) in list(self._active_spans.items()):
+            if tid == trace_id:
+                self.end(trace_id, stage, f"[auto-closed] started with: {input_sum}")
+
+    # ── Span lifecycle ───────────────────────────────────────────────────
+
+    def start(
+        self,
+        trace_id: str,
+        stage: Any,             # TraceStage
+        input_summary: str = "",
+    ) -> None:
+        """Record the start of a pipeline stage.
+
+        Args:
+            trace_id:  Trace identifier.
+            stage:     :class:`TraceStage` enum member.
+            input_summary: Short description of what entered this stage.
+
+        Raises:
+            ValueError: If the same stage is already active for this trace_id.
+        """
+        from src.models.rag import TraceStage as _TS
+
+        key = (trace_id, stage)
+        if key in self._active_spans:
+            raise ValueError(
+                f"Stage '{stage.value}' is already active for trace '{trace_id}'. "
+                f"Call end() before starting it again."
+            )
+        self.start_trace(trace_id)
+        self._active_spans[key] = (time.perf_counter(), input_summary)
+
+    def end(
+        self,
+        trace_id: str,
+        stage: Any,             # TraceStage
+        output_summary: str = "",
+    ) -> Any:                   # TraceEvent (Pydantic)
+        """Record the end of a pipeline stage and return the completed event.
+
+        Computes ``duration_ms`` from the corresponding ``start()`` call.
+
+        Args:
+            trace_id:  Trace identifier.
+            stage:     :class:`TraceStage` enum member.
+            output_summary: Short description of what this stage produced.
+
+        Returns:
+            A completed :class:`TraceEvent` (Pydantic model from ``src.models.rag``).
+
+        Raises:
+            ValueError: If the stage was not started.
+        """
+        from src.models.rag import TraceEvent, TraceStage as _TS
+
+        key = (trace_id, stage)
+        if key not in self._active_spans:
+            raise ValueError(
+                f"Stage '{stage.value}' was not started for trace '{trace_id}'. "
+                f"Call start() first."
+            )
+
+        started_float, input_summary = self._active_spans.pop(key)
+        duration_ms = (time.perf_counter() - started_float) * 1000.0
+
+        event = TraceEvent(
+            trace_id=trace_id,
+            stage=stage,
+            started_at=datetime.fromtimestamp(started_float, tz=timezone.utc),
+            duration_ms=round(duration_ms, 3),
+            input_summary=input_summary,
+            output_summary=output_summary,
+        )
+        self._traces.setdefault(trace_id, []).append(event)
+        self._notify(event)
+        return event
+
+    # ── Direct event recording ───────────────────────────────────────────
+
+    def record(self, trace_id: str, event: Any) -> None:
+        """Insert a pre-built :class:`TraceEvent` directly.
+
+        Use this when you already have a fully-formed event (e.g. from an
+        external source or reconstructed trace).
+
+        Args:
+            trace_id: Trace identifier.
+            event:    A :class:`TraceEvent` Pydantic instance.
+        """
+        self.start_trace(trace_id)
+        self._traces[trace_id].append(event)
+        self._notify(event)
+
+    # ── Retrieval ────────────────────────────────────────────────────────
+
+    def get_trace(self, trace_id: str) -> List[Any]:
+        """Return all events for *trace_id* in insertion order.
+
+        Args:
+            trace_id: Trace identifier.
+
+        Returns:
+            Ordered list of :class:`TraceEvent` objects (empty if unknown trace_id).
+        """
+        return list(self._traces.get(trace_id, []))
+
+    def list_trace_ids(self) -> List[str]:
+        """Return all trace identifiers that have at least one event."""
+        return [tid for tid, events in self._traces.items() if events]
+
+    @property
+    def trace_count(self) -> int:
+        """Number of traces with at least one recorded event."""
+        return sum(1 for events in self._traces.values() if events)
+
+    # ── Lifecycle ───────────────────────────────────────────────────────
+
+    def clear(self) -> None:
+        """Remove all traces and active spans."""
+        self._traces.clear()
+        self._active_spans.clear()
+
+    def clear_trace(self, trace_id: str) -> None:
+        """Remove a single trace and its active spans."""
+        self._traces.pop(trace_id, None)
+        for (tid, stage) in list(self._active_spans):
+            if tid == trace_id:
+                del self._active_spans[(tid, stage)]
+
+    # ── Real-time streaming (SSE) ────────────────────────────────────────
+
+    def subscribe(self, callback: Callable[[Any], None]) -> None:
+        """Register a callback invoked on every completed event.
+
+        Use for SSE, WebSocket, or log-based real-time output.
+
+        Args:
+            callback: ``Callable[[TraceEvent], None]`` — receives each event.
+        """
+        self._subscribers.append(callback)
+
+    def unsubscribe(self, callback: Callable[[Any], None]) -> None:
+        """Remove a previously registered subscriber."""
+        if callback in self._subscribers:
+            self._subscribers.remove(callback)
+
+    def _notify(self, event: Any) -> None:
+        """Push *event* to all subscribers (best-effort)."""
+        for cb in self._subscribers:
+            try:
+                cb(event)
+            except Exception:
+                pass  # Subscriber failure must not break pipeline
+
+
+# ── Global singleton ─────────────────────────────────────────────────────
+
+_default_recorder: Optional[TraceRecorder] = None
+
+
+def get_recorder() -> TraceRecorder:
+    """Return the global (process-level) TraceRecorder singleton."""
+    global _default_recorder
+    if _default_recorder is None:
+        _default_recorder = TraceRecorder()
+    return _default_recorder
+
+
+def set_recorder(recorder: TraceRecorder) -> None:
+    """Replace the global TraceRecorder (e.g. for testing)."""
+    global _default_recorder
+    _default_recorder = recorder

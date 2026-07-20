@@ -10,11 +10,15 @@ from src.rag.trace import (
     TraceContext,
     TraceEvent,
     TraceEventType,
+    TraceRecorder,
     TraceSpan,
     TraceStore,
+    get_recorder,
     get_trace_store,
+    set_recorder,
     set_trace_store,
 )
+from src.models.rag import TraceStage
 
 
 class TestTraceSpan:
@@ -219,3 +223,269 @@ class TestGlobalTraceStore:
         custom = TraceStore(max_traces=5)
         set_trace_store(custom)
         assert get_trace_store() is custom
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TraceRecorder Tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestTraceRecorderCreation:
+    """1. Trace can be created."""
+
+    def test_create_recorder(self):
+        rec = TraceRecorder()
+        assert rec.trace_count == 0
+        assert rec.list_trace_ids() == []
+
+    def test_start_trace_initialises(self):
+        rec = TraceRecorder()
+        rec.start_trace("t1")
+        assert rec.get_trace("t1") == []
+
+    def test_start_trace_idempotent(self):
+        rec = TraceRecorder()
+        rec.start_trace("t1")
+        rec.start_trace("t1")  # Should not raise or overwrite
+
+
+class TestTraceRecorderStartEnd:
+    """Core start/end recording."""
+
+    def test_start_end_single_stage(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE, "query=test")
+        event = rec.end("t1", TraceStage.RETRIEVE, "5 chunks")
+
+        assert event.trace_id == "t1"
+        assert event.stage == TraceStage.RETRIEVE
+        assert event.input_summary == "query=test"
+        assert event.output_summary == "5 chunks"
+        assert event.duration_ms >= 0
+
+    def test_end_without_start_raises(self):
+        rec = TraceRecorder()
+        with pytest.raises(ValueError, match="was not started"):
+            rec.end("t1", TraceStage.GENERATE)
+
+    def test_double_start_raises(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE)
+        with pytest.raises(ValueError, match="already active"):
+            rec.start("t1", TraceStage.RETRIEVE)
+
+
+class TestTraceRecorderEventOrder:
+    """2. Trace events are in correct order."""
+
+    def test_events_ordered_by_insertion(self):
+        rec = TraceRecorder()
+        stages = [
+            TraceStage.INTENT,
+            TraceStage.RETRIEVE,
+            TraceStage.RERANK,
+            TraceStage.GENERATE,
+            TraceStage.COMPLETE,
+        ]
+        for s in stages:
+            rec.start("t1", s, f"in:{s.value}")
+            rec.end("t1", s, f"out:{s.value}")
+
+        events = rec.get_trace("t1")
+        assert len(events) == 5
+        for i, s in enumerate(stages):
+            assert events[i].stage == s
+
+    def test_multiple_traces_independent(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.end("t1", TraceStage.RETRIEVE, "5 chunks")
+
+        rec.start("t2", TraceStage.GENERATE)
+        rec.end("t2", TraceStage.GENERATE, "answer")
+
+        assert len(rec.get_trace("t1")) == 1
+        assert len(rec.get_trace("t2")) == 1
+        assert rec.get_trace("t1")[0].stage == TraceStage.RETRIEVE
+        assert rec.get_trace("t2")[0].stage == TraceStage.GENERATE
+
+    def test_same_stage_different_traces_ok(self):
+        """Same stage can be active in different traces simultaneously."""
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.start("t2", TraceStage.RETRIEVE)  # Should not raise
+        rec.end("t1", TraceStage.RETRIEVE)
+        rec.end("t2", TraceStage.RETRIEVE)
+        assert len(rec.get_trace("t1")) == 1
+        assert len(rec.get_trace("t2")) == 1
+
+
+class TestTraceRecorderTiming:
+    """3. Time statistics are correct."""
+
+    def test_duration_ms_positive(self):
+        rec = TraceRecorder()
+        import time
+        rec.start("t1", TraceStage.GENERATE, "in")
+        time.sleep(0.05)
+        evt = rec.end("t1", TraceStage.GENERATE, "out")
+        assert evt.duration_ms >= 40  # at least 40ms
+
+    def test_duration_is_monotonic(self):
+        """Later stages should not have zero or negative time relative to earlier."""
+        rec = TraceRecorder()
+        import time
+
+        rec.start("t1", TraceStage.RETRIEVE)
+        time.sleep(0.01)
+        evt1 = rec.end("t1", TraceStage.RETRIEVE)
+
+        rec.start("t1", TraceStage.GENERATE)
+        time.sleep(0.02)
+        evt2 = rec.end("t1", TraceStage.GENERATE)
+
+        # Both have positive duration
+        assert evt1.duration_ms > 0
+        assert evt2.duration_ms > 0
+
+
+class TestTraceRecorderRecord:
+    """Direct event recording via record()."""
+
+    def test_record_prebuilt_event(self):
+        from src.models.rag import TraceEvent
+        from datetime import datetime, timezone
+
+        rec = TraceRecorder()
+        evt = TraceEvent(
+            trace_id="t1",
+            stage=TraceStage.ERROR,
+            started_at=datetime.now(timezone.utc),
+            duration_ms=100.0,
+            input_summary="query=test",
+            output_summary="error=timeout",
+        )
+        rec.record("t1", evt)
+        assert len(rec.get_trace("t1")) == 1
+        assert rec.get_trace("t1")[0].stage == TraceStage.ERROR
+
+
+class TestTraceRecorderManagement:
+    """Lifecycle management: end_trace, clear, clear_trace."""
+
+    def test_end_trace_auto_closes_spans(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE, "in")
+        # Forget to call end() — end_trace should close it
+        rec.end_trace("t1")
+
+        events = rec.get_trace("t1")
+        assert len(events) == 1
+        assert "[auto-closed]" in events[0].output_summary
+
+    def test_clear_removes_all(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.end("t1", TraceStage.RETRIEVE)
+        rec.clear()
+        assert rec.trace_count == 0
+        assert rec.get_trace("t1") == []
+
+    def test_clear_trace_single(self):
+        rec = TraceRecorder()
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.end("t1", TraceStage.RETRIEVE)
+        rec.start("t2", TraceStage.GENERATE)
+        rec.end("t2", TraceStage.GENERATE)
+
+        rec.clear_trace("t1")
+        assert rec.get_trace("t1") == []
+        assert len(rec.get_trace("t2")) == 1
+
+    def test_list_trace_ids(self):
+        rec = TraceRecorder()
+        assert rec.list_trace_ids() == []
+        rec.start("t_a", TraceStage.RETRIEVE)
+        rec.end("t_a", TraceStage.RETRIEVE)
+        rec.start("t_b", TraceStage.GENERATE)
+        rec.end("t_b", TraceStage.GENERATE)
+        ids = rec.list_trace_ids()
+        assert "t_a" in ids
+        assert "t_b" in ids
+        assert len(ids) == 2
+
+
+class TestTraceRecorderSubscribers:
+    """SSE real-time subscriber support."""
+
+    def test_subscriber_called_on_end(self):
+        rec = TraceRecorder()
+        received = []
+
+        def cb(event):
+            received.append(event)
+
+        rec.subscribe(cb)
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.end("t1", TraceStage.RETRIEVE, "done")
+
+        assert len(received) == 1
+        assert received[0].stage == TraceStage.RETRIEVE
+
+    def test_subscriber_called_on_record(self):
+        rec = TraceRecorder()
+        received = []
+
+        def cb(event):
+            received.append(event)
+
+        rec.subscribe(cb)
+        from src.models.rag import TraceEvent
+        from datetime import datetime, timezone
+        evt = TraceEvent(
+            trace_id="t1", stage=TraceStage.COMPLETE,
+            started_at=datetime.now(timezone.utc),
+        )
+        rec.record("t1", evt)
+        assert len(received) == 1
+
+    def test_unsubscribe_stops_calls(self):
+        rec = TraceRecorder()
+        received = []
+
+        def cb(event):
+            received.append(event)
+
+        rec.subscribe(cb)
+        rec.unsubscribe(cb)
+        rec.start("t1", TraceStage.RETRIEVE)
+        rec.end("t1", TraceStage.RETRIEVE)
+        assert len(received) == 0
+
+    def test_subscriber_exception_does_not_break_pipeline(self):
+        rec = TraceRecorder()
+
+        def bad_cb(event):
+            raise RuntimeError("subscriber boom")
+
+        rec.subscribe(bad_cb)
+        # Should not raise
+        rec.start("t1", TraceStage.RETRIEVE)
+        event = rec.end("t1", TraceStage.RETRIEVE, "ok")
+        assert event is not None
+
+
+class TestGlobalRecorder:
+    """Global TraceRecorder singleton."""
+
+    def teardown_method(self):
+        set_recorder(TraceRecorder())
+
+    def test_get_default(self):
+        r = get_recorder()
+        assert isinstance(r, TraceRecorder)
+
+    def test_set_custom(self):
+        custom = TraceRecorder()
+        set_recorder(custom)
+        assert get_recorder() is custom

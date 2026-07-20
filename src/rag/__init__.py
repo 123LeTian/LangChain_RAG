@@ -44,9 +44,12 @@ from src.rag.trace import (
     TraceContext,
     TraceEvent,
     TraceEventType,
+    TraceRecorder,
     TraceSpan,
     TraceStore,
+    get_recorder,
     get_trace_store,
+    set_recorder,
     set_trace_store,
 )
 
@@ -83,6 +86,9 @@ __all__ = [
     "TraceContext",
     "SpanStatus",
     "TraceStore",
+    "TraceRecorder",
     "get_trace_store",
     "set_trace_store",
+    "get_recorder",
+    "set_recorder",
 ]
