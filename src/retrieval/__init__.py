@@ -1,4 +1,4 @@
-﻿from .embeddings import BaseEmbedder, HashEmbedder, OpenAIEmbedder
+﻿from .embeddings import BaseEmbedder, HashEmbedder, OpenAIEmbedder, HuggingFaceEmbedder
 from .vector_index import BaseVectorIndex, InMemoryVectorIndex, ChromaVectorIndex
 from .retriever import Retriever
 from .reranker import BaseReranker, SimpleReranker, CrossEncoderReranker
@@ -8,7 +8,7 @@ from .hybrid import HybridRetriever, KeywordSearcher
 from .protocols import KnowledgeRepository, SimpleKnowledgeRepository
 
 __all__ = [
-    "BaseEmbedder", "HashEmbedder", "OpenAIEmbedder",
+    "BaseEmbedder", "HashEmbedder", "OpenAIEmbedder", "HuggingFaceEmbedder",
     "BaseVectorIndex", "InMemoryVectorIndex", "ChromaVectorIndex",
     "Retriever",
     "BaseReranker", "SimpleReranker", "CrossEncoderReranker",
@@ -17,3 +17,4 @@ __all__ = [
     "HybridRetriever", "KeywordSearcher",
     "KnowledgeRepository", "SimpleKnowledgeRepository",
 ]
+
