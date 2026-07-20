@@ -1,9 +1,10 @@
-"""Vector indexes used by retrieval and the offline ingestion pipeline."""
+"""Vector-index protocol and isolated in-memory/Chroma implementations."""
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
+import math
 from threading import RLock
-from typing import List, Optional, Sequence
+from typing import Any, List, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 
@@ -12,73 +13,190 @@ from src.models.schemas import ChunkRecord, RetrievalHit
 from .embeddings import BaseEmbedder
 
 
-class BaseVectorIndex(ABC):
-    """Backward-compatible vector-index contract."""
+MetadataFilters = Optional[Mapping[str, Any]]
 
-    @abstractmethod
-    def add_chunks(self, chunks: List[ChunkRecord]) -> None:
-        """Embed and add chunks using the index's configured embedder."""
+
+@runtime_checkable
+class VectorIndexProtocol(Protocol):
+    """Formal storage contract required by B2 indexing and B3 retrieval."""
 
     def upsert(
         self,
         chunks: Sequence[ChunkRecord],
         vectors: Sequence[Sequence[float]],
+    ) -> None: ...
+
+    def search(
+        self,
+        query_vector: Sequence[float],
+        kb_id: str,
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]: ...
+
+    def delete_by_document_id(self, document_id: str) -> int: ...
+
+    def delete_by_kb_id(self, kb_id: str) -> int: ...
+
+    def count(self, kb_id: Optional[str] = None) -> int: ...
+
+    def clear(self) -> None: ...
+
+
+class BaseVectorIndex(ABC):
+    """Backward-compatible ABC implementing the formal vector-index semantics."""
+
+    @abstractmethod
+    def add_chunks(self, chunks: List[ChunkRecord]) -> None:
+        """Embed and add chunks using the configured embedder."""
+
+    @abstractmethod
+    def upsert(
+        self,
+        chunks: Sequence[ChunkRecord],
+        vectors: Sequence[Sequence[float]],
     ) -> None:
-        """Write precomputed vectors; concrete B2-capable indexes override this."""
-
-        raise NotImplementedError("This vector index does not support precomputed upsert")
-
-    def delete_by_document_id(self, document_id: str) -> int:
-        """Delete one document's vectors; concrete B2-capable indexes override this."""
-
-        raise NotImplementedError("This vector index does not support document deletion")
+        """Insert or replace chunks and their precomputed vectors."""
 
     @abstractmethod
     def search(
-        self, query_vector: List[float], top_k: int = 5
+        self,
+        query_vector: Sequence[float],
+        kb_id: str,
+        top_k: int = 5,
+        filters: MetadataFilters = None,
     ) -> List[RetrievalHit]:
-        """Search for the most similar chunks."""
+        """Search only candidates belonging to one knowledge base."""
 
     @abstractmethod
-    def count(self) -> int:
-        """Return the number of indexed chunks."""
+    def search_all(
+        self,
+        query_vector: Sequence[float],
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]:
+        """Explicit management/legacy search across all knowledge bases."""
 
     @abstractmethod
-    def clear(self) -> None:
-        """Remove all indexed chunks."""
+    def delete_by_document_id(self, document_id: str) -> int: ...
+
+    @abstractmethod
+    def delete_by_kb_id(self, kb_id: str) -> int: ...
+
+    @abstractmethod
+    def count(self, kb_id: Optional[str] = None) -> int: ...
+
+    @abstractmethod
+    def clear(self) -> None: ...
+
+
+def _validate_identifier(value: str, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+
+
+def _validate_top_k(top_k: int) -> None:
+    if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+        raise ValueError("top_k must be a positive integer")
+
+
+def _normalize_filters(kb_id: Optional[str], filters: MetadataFilters) -> dict:
+    if filters is None:
+        return {}
+    if not isinstance(filters, Mapping):
+        raise TypeError("filters must be a mapping or None")
+    normalized = dict(filters)
+    requested_kb = normalized.pop("kb_id", kb_id)
+    if kb_id is not None and requested_kb != kb_id:
+        raise ValueError("filters cannot override kb_id")
+    return normalized
 
 
 def _validate_batch(
     chunks: Sequence[ChunkRecord],
     vectors: Sequence[Sequence[float]],
-) -> None:
+) -> List[List[float]]:
     if len(chunks) != len(vectors):
         raise ValueError(
             f"Chunk/vector count mismatch: {len(chunks)} chunks, {len(vectors)} vectors"
         )
-    if not chunks:
-        return
-    dimensions = {len(vector) for vector in vectors}
-    if 0 in dimensions or len(dimensions) != 1:
-        raise ValueError("All vectors must have one consistent non-zero dimension")
+    if len({chunk.id for chunk in chunks}) != len(chunks):
+        raise ValueError("Chunk IDs must be unique within an upsert batch")
+
+    result: List[List[float]] = []
+    dimension: Optional[int] = None
+    for index, (chunk, raw_vector) in enumerate(zip(chunks, vectors)):
+        _validate_identifier(chunk.id, "chunk.id")
+        _validate_identifier(chunk.kb_id, "chunk.kb_id")
+        _validate_identifier(chunk.document_id, "chunk.document_id")
+        try:
+            vector = [float(value) for value in raw_vector]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Vector {index} contains non-numeric values") from exc
+        if not vector or not all(math.isfinite(value) for value in vector):
+            raise ValueError("Vectors must contain finite values and be non-empty")
+        if dimension is None:
+            dimension = len(vector)
+        elif len(vector) != dimension:
+            raise ValueError("All vectors must have one consistent dimension")
+        result.append(vector)
+    return result
 
 
-def _vector_metadata(chunk: ChunkRecord) -> dict:
-    metadata = deepcopy(chunk.metadata)
-    metadata.setdefault("kb_id", chunk.kb_id)
-    metadata.setdefault("document_id", chunk.document_id)
-    metadata.setdefault("chunk_id", chunk.id)
-    metadata.setdefault("chunk_index", chunk.index)
-    return {key: value for key, value in metadata.items() if value is not None}
+def _stored_chunk(chunk: ChunkRecord) -> ChunkRecord:
+    stored = deepcopy(chunk)
+    metadata = deepcopy(stored.metadata)
+    protected = {
+        "kb_id": stored.kb_id,
+        "document_id": stored.document_id,
+        "chunk_id": stored.id,
+        "chunk_index": stored.index,
+    }
+    for key, expected in protected.items():
+        actual = metadata.get(key, expected)
+        if actual != expected:
+            raise ValueError(f"Chunk metadata '{key}' conflicts with its canonical value")
+        metadata[key] = expected
+    stored.metadata = metadata
+    return stored
+
+
+def _matches_filters(chunk: ChunkRecord, filters: Mapping[str, Any]) -> bool:
+    return all(chunk.metadata.get(key) == value for key, value in filters.items())
+
+
+def _query_array(query_vector: Sequence[float], dimension: Optional[int]) -> np.ndarray:
+    try:
+        query = np.asarray([float(value) for value in query_vector], dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("query_vector must contain numeric values") from exc
+    if query.ndim != 1 or not len(query) or not np.all(np.isfinite(query)):
+        raise ValueError("query_vector must be a non-empty finite one-dimensional vector")
+    if dimension is not None and len(query) != dimension:
+        raise ValueError(
+            f"Query vector dimension mismatch: expected {dimension}, got {len(query)}"
+        )
+    return query
+
+
+def _hit(chunk: ChunkRecord, score: float, rank: int) -> RetrievalHit:
+    return RetrievalHit(
+        chunk=deepcopy(chunk),
+        score=float(score),
+        rank=rank,
+        retriever="vector",
+        metadata=deepcopy(chunk.metadata),
+    )
 
 
 class InMemoryVectorIndex(BaseVectorIndex):
-    """Thread-safe NumPy-backed vector index for development and offline tests."""
+    """Thread-safe index that filters candidates before similarity and Top-K."""
 
     def __init__(self, embedder: BaseEmbedder):
         self.embedder = embedder
         self._chunks: List[ChunkRecord] = []
         self._vectors: List[np.ndarray] = []
+        self._dimension: Optional[int] = None
         self._lock = RLock()
 
     def add_chunks(self, chunks: List[ChunkRecord]) -> None:
@@ -90,77 +208,129 @@ class InMemoryVectorIndex(BaseVectorIndex):
         chunks: Sequence[ChunkRecord],
         vectors: Sequence[Sequence[float]],
     ) -> None:
-        candidates = list(chunks)
-        candidate_vectors = [list(vector) for vector in vectors]
-        _validate_batch(candidates, candidate_vectors)
-        if len({chunk.id for chunk in candidates}) != len(candidates):
-            raise ValueError("Chunk IDs must be unique within an upsert batch")
-
-        new_vectors = [np.asarray(vector, dtype=np.float32) for vector in candidate_vectors]
-        if any(not np.all(np.isfinite(vector)) for vector in new_vectors):
-            raise ValueError("Vectors must contain only finite numeric values")
+        candidates = [_stored_chunk(chunk) for chunk in chunks]
+        candidate_vectors = _validate_batch(candidates, vectors)
+        if not candidates:
+            return
+        dimension = len(candidate_vectors[0])
+        arrays = [np.asarray(vector, dtype=np.float32) for vector in candidate_vectors]
 
         with self._lock:
+            if self._dimension is not None and dimension != self._dimension:
+                raise ValueError(
+                    f"Vector dimension mismatch: expected {self._dimension}, got {dimension}"
+                )
             incoming_ids = {chunk.id for chunk in candidates}
             retained = [
                 (chunk, vector)
                 for chunk, vector in zip(self._chunks, self._vectors)
                 if chunk.id not in incoming_ids
             ]
-            self._chunks = [deepcopy(chunk) for chunk, _ in retained]
-            self._vectors = [vector.copy() for _, vector in retained]
-            self._chunks.extend(deepcopy(candidates))
-            self._vectors.extend(vector.copy() for vector in new_vectors)
+            self._chunks = [chunk for chunk, _ in retained] + candidates
+            self._vectors = [vector for _, vector in retained] + arrays
+            self._dimension = dimension
+
+    def search(
+        self,
+        query_vector: Sequence[float],
+        kb_id: str,
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]:
+        _validate_identifier(kb_id, "kb_id")
+        return self._search(query_vector, kb_id, top_k, filters)
+
+    def search_all(
+        self,
+        query_vector: Sequence[float],
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]:
+        return self._search(query_vector, None, top_k, filters)
+
+    def _search(
+        self,
+        query_vector: Sequence[float],
+        kb_id: Optional[str],
+        top_k: int,
+        filters: MetadataFilters,
+    ) -> List[RetrievalHit]:
+        _validate_top_k(top_k)
+        normalized_filters = _normalize_filters(kb_id, filters)
+        with self._lock:
+            dimension = self._dimension
+            entries = [
+                (deepcopy(chunk), vector.copy())
+                for chunk, vector in zip(self._chunks, self._vectors)
+                if (kb_id is None or chunk.kb_id == kb_id)
+                and _matches_filters(chunk, normalized_filters)
+            ]
+        query = _query_array(query_vector, dimension)
+        if not entries:
+            return []
+
+        query_norm = np.linalg.norm(query)
+        scored = []
+        for chunk, vector in entries:
+            denominator = np.linalg.norm(vector) * query_norm
+            score = float(vector @ query / denominator) if denominator else 0.0
+            scored.append((score, chunk.id, chunk))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            _hit(chunk, score, rank)
+            for rank, (score, _, chunk) in enumerate(scored[:top_k])
+        ]
 
     def delete_by_document_id(self, document_id: str) -> int:
+        _validate_identifier(document_id, "document_id")
+        return self._delete(lambda chunk: chunk.document_id == document_id)
+
+    def delete_by_kb_id(self, kb_id: str) -> int:
+        _validate_identifier(kb_id, "kb_id")
+        return self._delete(lambda chunk: chunk.kb_id == kb_id)
+
+    def _delete(self, predicate) -> int:
         with self._lock:
             retained = [
                 (chunk, vector)
                 for chunk, vector in zip(self._chunks, self._vectors)
-                if chunk.document_id != document_id
+                if not predicate(chunk)
             ]
             deleted = len(self._chunks) - len(retained)
             self._chunks = [chunk for chunk, _ in retained]
             self._vectors = [vector for _, vector in retained]
+            if not self._chunks:
+                self._dimension = None
             return deleted
 
-    def search(
-        self, query_vector: List[float], top_k: int = 5
-    ) -> List[RetrievalHit]:
+    def count(self, kb_id: Optional[str] = None) -> int:
+        if kb_id is not None:
+            _validate_identifier(kb_id, "kb_id")
         with self._lock:
-            if not self._chunks:
-                return []
-            chunks = deepcopy(self._chunks)
-            vectors = [vector.copy() for vector in self._vectors]
-
-        query = np.asarray(query_vector, dtype=np.float32)
-        matrix = np.asarray(vectors, dtype=np.float32)
-        scores = matrix @ query / (
-            np.linalg.norm(matrix, axis=1) * np.linalg.norm(query) + 1e-8
-        )
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        return [
-            RetrievalHit(
-                chunk=chunks[index],
-                score=float(scores[index]),
-                rank=rank,
-                retriever="vector",
-            )
-            for rank, index in enumerate(top_indices)
-        ]
-
-    def count(self) -> int:
-        with self._lock:
-            return len(self._chunks)
+            return sum(1 for chunk in self._chunks if kb_id is None or chunk.kb_id == kb_id)
 
     def clear(self) -> None:
         with self._lock:
             self._chunks = []
             self._vectors = []
+            self._dimension = None
+
+
+def _chroma_where(kb_id: Optional[str], filters: MetadataFilters) -> Optional[dict]:
+    normalized = _normalize_filters(kb_id, filters)
+    conditions = []
+    if kb_id is not None:
+        conditions.append({"kb_id": {"$eq": kb_id}})
+    conditions.extend({key: {"$eq": value}} for key, value in normalized.items())
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
 
 
 class ChromaVectorIndex(BaseVectorIndex):
-    """Optional Chroma index; importing this module does not require Chroma."""
+    """Optional Chroma index using database-side ``where`` isolation."""
 
     def __init__(
         self,
@@ -179,7 +349,10 @@ class ChromaVectorIndex(BaseVectorIndex):
         try:
             import chromadb
         except ImportError as exc:
-            raise ImportError("请安装 chromadb: pip install chromadb") from exc
+            raise ImportError(
+                "ChromaVectorIndex 需要可选依赖 'chromadb'；"
+                "请执行: pip install -r requirements-chroma.txt"
+            ) from exc
         if self._persist_path:
             self._client = chromadb.PersistentClient(path=self._persist_path)
         else:
@@ -197,61 +370,101 @@ class ChromaVectorIndex(BaseVectorIndex):
         chunks: Sequence[ChunkRecord],
         vectors: Sequence[Sequence[float]],
     ) -> None:
-        candidates = list(chunks)
-        candidate_vectors = [list(vector) for vector in vectors]
-        _validate_batch(candidates, candidate_vectors)
+        candidates = [_stored_chunk(chunk) for chunk in chunks]
+        candidate_vectors = _validate_batch(candidates, vectors)
         if not candidates:
             return
         self._collection.upsert(
             ids=[chunk.id for chunk in candidates],
             embeddings=candidate_vectors,
             documents=[chunk.text for chunk in candidates],
-            metadatas=[_vector_metadata(chunk) for chunk in candidates],
+            metadatas=[deepcopy(chunk.metadata) for chunk in candidates],
         )
 
+    def search(
+        self,
+        query_vector: Sequence[float],
+        kb_id: str,
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]:
+        _validate_identifier(kb_id, "kb_id")
+        return self._search(query_vector, kb_id, top_k, filters)
+
+    def search_all(
+        self,
+        query_vector: Sequence[float],
+        top_k: int = 5,
+        filters: MetadataFilters = None,
+    ) -> List[RetrievalHit]:
+        return self._search(query_vector, None, top_k, filters)
+
+    def _search(
+        self,
+        query_vector: Sequence[float],
+        kb_id: Optional[str],
+        top_k: int,
+        filters: MetadataFilters,
+    ) -> List[RetrievalHit]:
+        _validate_top_k(top_k)
+        query = _query_array(query_vector, None).tolist()
+        where = _chroma_where(kb_id, filters)
+        get_options = {"where": where} if where is not None else {}
+        candidate_ids = self._collection.get(**get_options).get("ids", [])
+        if not candidate_ids:
+            return []
+        query_options = {
+            "query_embeddings": [query],
+            # Query all already-filtered candidates so equal-score ties can be
+            # ordered deterministically by chunk ID before applying Top-K.
+            "n_results": len(candidate_ids),
+        }
+        if where is not None:
+            query_options["where"] = where
+        results = self._collection.query(**query_options)
+        scored = []
+        for chunk_id, distance, text, metadata in zip(
+            results["ids"][0],
+            results["distances"][0],
+            results["documents"][0],
+            results["metadatas"][0],
+        ):
+            chunk = ChunkRecord(
+                id=chunk_id,
+                document_id=metadata["document_id"],
+                kb_id=metadata["kb_id"],
+                text=text,
+                index=metadata.get("chunk_index", 0),
+                metadata=deepcopy(metadata),
+            )
+            scored.append((1.0 - float(distance), chunk.id, chunk))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            _hit(chunk, score, rank)
+            for rank, (score, _, chunk) in enumerate(scored[:top_k])
+        ]
+
     def delete_by_document_id(self, document_id: str) -> int:
-        existing = self._collection.get(where={"document_id": document_id})
+        _validate_identifier(document_id, "document_id")
+        return self._delete_where({"document_id": {"$eq": document_id}})
+
+    def delete_by_kb_id(self, kb_id: str) -> int:
+        _validate_identifier(kb_id, "kb_id")
+        return self._delete_where({"kb_id": {"$eq": kb_id}})
+
+    def _delete_where(self, where: dict) -> int:
+        existing = self._collection.get(where=where)
         ids = existing.get("ids", [])
         if ids:
             self._collection.delete(ids=ids)
         return len(ids)
 
-    def search(
-        self, query_vector: List[float], top_k: int = 5
-    ) -> List[RetrievalHit]:
-        results = self._collection.query(
-            query_embeddings=[query_vector],
-            n_results=top_k,
-        )
-        hits = []
-        for rank, (chunk_id, distance, text, metadata) in enumerate(
-            zip(
-                results["ids"][0],
-                results["distances"][0],
-                results["documents"][0],
-                results["metadatas"][0],
-            )
-        ):
-            chunk = ChunkRecord(
-                id=chunk_id,
-                document_id=metadata.get("document_id", ""),
-                kb_id=metadata.get("kb_id", ""),
-                text=text,
-                index=metadata.get("chunk_index", metadata.get("index", 0)),
-                metadata=metadata,
-            )
-            hits.append(
-                RetrievalHit(
-                    chunk=chunk,
-                    score=1.0 - distance,
-                    rank=rank,
-                    retriever="vector",
-                )
-            )
-        return hits
-
-    def count(self) -> int:
-        return self._collection.count()
+    def count(self, kb_id: Optional[str] = None) -> int:
+        if kb_id is None:
+            return self._collection.count()
+        _validate_identifier(kb_id, "kb_id")
+        result = self._collection.get(where={"kb_id": {"$eq": kb_id}})
+        return len(result.get("ids", []))
 
     def clear(self) -> None:
         self._client.delete_collection(self._collection_name)
@@ -260,4 +473,10 @@ class ChromaVectorIndex(BaseVectorIndex):
         )
 
 
-__all__ = ["BaseVectorIndex", "ChromaVectorIndex", "InMemoryVectorIndex"]
+__all__ = [
+    "BaseVectorIndex",
+    "ChromaVectorIndex",
+    "InMemoryVectorIndex",
+    "MetadataFilters",
+    "VectorIndexProtocol",
+]

@@ -141,7 +141,11 @@ def assert_indexed(service, vector_index, document_id, kb_id="kb-1"):
         assert "section" in chunk.metadata
         assert chunk.metadata["chunk_index"] == chunk.index
     query = vector_index.embedder.embed_query(document.text)
-    hits = vector_index.search(query, top_k=len(chunks))
+    hits = vector_index.search(
+        query,
+        kb_id=document.kb_id,
+        top_k=len(chunks),
+    )
     assert {hit.chunk.id for hit in hits} == {chunk.id for chunk in chunks}
     assert all(hit.chunk.metadata["chunk_id"] == hit.chunk.id for hit in hits)
     return document, chunks

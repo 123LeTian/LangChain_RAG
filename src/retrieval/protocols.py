@@ -1,9 +1,23 @@
 ﻿"""KnowledgeRepository 协议：管理知识库的统一接口。"""
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, List, Optional, Protocol, runtime_checkable
 from src.models.schemas import ChunkRecord, RetrievalHit
 from .embeddings import BaseEmbedder
 from .vector_index import BaseVectorIndex
+
+
+@runtime_checkable
+class RetrieverProtocol(Protocol):
+    """Structural copy of C's frozen synchronous retrieval contract."""
+
+    def retrieve(self, query: str, top_k: int = 5, **kwargs: Any) -> Any:
+        """Return C's RAGContext for one query."""
+        ...
+
+    @property
+    def retriever_name(self) -> str:
+        """Human-readable retriever name used by C's trace layer."""
+        ...
 
 
 class KnowledgeRepository(ABC):
@@ -54,7 +68,7 @@ class SimpleKnowledgeRepository(KnowledgeRepository):
 
     def search(self, query: str, top_k: int = 5) -> List[RetrievalHit]:
         query_vec = self.embedder.embed_query(query)
-        return self.index.search(query_vec, top_k=top_k)
+        return self.index.search_all(query_vec, top_k=top_k)
 
     def get_chunk(self, chunk_id: str) -> Optional[ChunkRecord]:
         return self._chunks.get(chunk_id)
@@ -65,3 +79,10 @@ class SimpleKnowledgeRepository(KnowledgeRepository):
     def clear(self) -> None:
         self._chunks = {}
         self.index.clear()
+
+
+__all__ = [
+    "KnowledgeRepository",
+    "RetrieverProtocol",
+    "SimpleKnowledgeRepository",
+]

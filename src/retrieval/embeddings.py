@@ -1,12 +1,52 @@
-﻿"""文本向量化模块。"""
+"""Embedding adapters with a shared, offline-safe compatibility contract."""
+
 from abc import ABC, abstractmethod
-from typing import List, Optional
 import hashlib
+import math
+from typing import List, Optional, Sequence
+
 import numpy as np
 
 
+def _validate_texts(texts: List[str]) -> None:
+    if not isinstance(texts, list):
+        raise TypeError("texts must be a list of strings")
+    for index, text in enumerate(texts):
+        if not isinstance(text, str):
+            raise TypeError(f"texts[{index}] must be a string")
+        if not text.strip():
+            raise ValueError(f"texts[{index}] must not be empty")
+
+
+def _validated_vectors(
+    vectors: Sequence[Sequence[float]],
+    expected_count: int,
+) -> List[List[float]]:
+    if len(vectors) != expected_count:
+        raise ValueError(
+            f"Embedding count mismatch: expected {expected_count}, got {len(vectors)}"
+        )
+    result: List[List[float]] = []
+    dimension: Optional[int] = None
+    for index, raw_vector in enumerate(vectors):
+        try:
+            vector = [float(value) for value in raw_vector]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Embedding {index} contains non-numeric values") from exc
+        if not vector:
+            raise ValueError(f"Embedding {index} must not be empty")
+        if not all(math.isfinite(value) for value in vector):
+            raise ValueError(f"Embedding {index} must contain only finite values")
+        if dimension is None:
+            dimension = len(vector)
+        elif len(vector) != dimension:
+            raise ValueError("Embedding vectors must have one consistent dimension")
+        result.append(vector)
+    return result
+
+
 class BaseEmbedder(ABC):
-    """Embedding 抽象基类。"""
+    """Common embedding contract used by indexing and retrieval."""
 
     @property
     @abstractmethod
@@ -18,20 +58,22 @@ class BaseEmbedder(ABC):
 
     @abstractmethod
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """把一组文本变成向量。"""
-        ...
+        """Embed a batch while preserving its input order."""
 
-    def embed_query(self, query: str) -> List[float]:
-        """把单个查询变成向量。"""
-        return self.embed_texts([query])[0]
+    def embed(self, text: str) -> List[float]:
+        """Embed one non-empty text using the batch implementation."""
+
+        _validate_texts([text])
+        return self.embed_texts([text])[0]
+
+    def embed_query(self, text: str) -> List[float]:
+        """Compatibility alias for :meth:`embed`."""
+
+        return self.embed(text)
 
 
 class HuggingFaceEmbedder(BaseEmbedder):
-    """延迟加载的 HuggingFace 本地向量化器。
-
-    ``sentence-transformers`` 仅在第一次对非空文本执行向量化时导入，
-    因此基础检索功能不需要安装该可选依赖。
-    """
+    """Lazily initialized local sentence-transformers embedder."""
 
     def __init__(
         self,
@@ -81,6 +123,7 @@ class HuggingFaceEmbedder(BaseEmbedder):
         return self._model
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        _validate_texts(texts)
         if not texts:
             return []
         model = self._get_model()
@@ -89,19 +132,18 @@ class HuggingFaceEmbedder(BaseEmbedder):
             batch_size=self._batch_size,
             normalize_embeddings=True,
         )
-        if hasattr(embeddings, "tolist"):
-            return embeddings.tolist()
-        return [list(embedding) for embedding in embeddings]
+        raw_vectors = embeddings.tolist() if hasattr(embeddings, "tolist") else embeddings
+        vectors = _validated_vectors(raw_vectors, len(texts))
+        self._dim = len(vectors[0])
+        return vectors
 
-    def embed_query(self, query: str) -> List[float]:
-        return self.embed_texts([query])[0]
 
 class HashEmbedder(BaseEmbedder):
-    """哈希向量器（无需外部依赖，仅用于测试和演示）。
-    生产环境请用 OpenAIEmbedder 或 HuggingFaceEmbedder。
-    """
+    """Deterministic, dependency-free embedder for tests and demos."""
 
     def __init__(self, dim: int = 256):
+        if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
+            raise ValueError("dim must be a positive integer")
         self._dim = dim
 
     @property
@@ -113,25 +155,29 @@ class HashEmbedder(BaseEmbedder):
         return self._dim
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        vectors = []
+        _validate_texts(texts)
+        vectors: List[List[float]] = []
         for text in texts:
-            h = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            vec = np.zeros(self._dim, dtype=np.float32)
-            for i, ch in enumerate(h):
-                if i >= self._dim:
-                    break
-                vec[i] = (ord(ch) - 48) / 48.0
-            norm = np.linalg.norm(vec)
+            digest = hashlib.sha256(text.encode("utf-8")).digest()
+            vector = np.zeros(self._dim, dtype=np.float32)
+            for index in range(self._dim):
+                byte = digest[index % len(digest)]
+                vector[index] = (float(byte) - 127.5) / 127.5
+            norm = np.linalg.norm(vector)
             if norm > 0:
-                vec = vec / norm
-            vectors.append(vec.tolist())
-        return vectors
+                vector = vector / norm
+            vectors.append(vector.tolist())
+        return _validated_vectors(vectors, len(texts)) if vectors else []
 
 
 class OpenAIEmbedder(BaseEmbedder):
-    """OpenAI Embedding 向量器。"""
+    """Lazily initialized OpenAI embedding adapter."""
 
-    def __init__(self, model: str = "text-embedding-3-small", api_key: str = None):
+    def __init__(
+        self,
+        model: str = "text-embedding-3-small",
+        api_key: Optional[str] = None,
+    ):
         self._model = model
         self._api_key = api_key
         self._client = None
@@ -149,16 +195,31 @@ class OpenAIEmbedder(BaseEmbedder):
         if self._client is None:
             try:
                 import openai
-            except ImportError:
-                raise ImportError("请安装 openai: pip install openai")
+            except ImportError as exc:
+                raise ImportError("请安装 openai: pip install openai") from exc
             import os
+
             key = self._api_key or os.getenv("OPENAI_API_KEY")
             self._client = openai.OpenAI(api_key=key)
         return self._client
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        _validate_texts(texts)
+        if not texts:
+            return []
         client = self._get_client()
-        resp = client.embeddings.create(model=self._model, input=texts)
-        self._dim = len(resp.data[0].embedding)
-        return [d.embedding for d in resp.data]
+        response = client.embeddings.create(model=self._model, input=texts)
+        vectors = _validated_vectors(
+            [item.embedding for item in response.data],
+            len(texts),
+        )
+        self._dim = len(vectors[0])
+        return vectors
 
+
+__all__ = [
+    "BaseEmbedder",
+    "HashEmbedder",
+    "HuggingFaceEmbedder",
+    "OpenAIEmbedder",
+]

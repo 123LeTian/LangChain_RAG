@@ -111,3 +111,13 @@ def test_hash_and_openai_public_constructors_remain_compatible():
     assert openai_embedder.model_name == "text-embedding-3-small"
     assert openai_embedder.dimension == 1536
     assert openai_embedder._client is None
+
+
+def test_optional_embedders_accept_empty_batch_without_initializing_clients():
+    huggingface = HuggingFaceEmbedder()
+    openai = OpenAIEmbedder(api_key="not-used")
+
+    assert huggingface.embed_texts([]) == []
+    assert openai.embed_texts([]) == []
+    assert huggingface._model is None
+    assert openai._client is None
