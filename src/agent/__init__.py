@@ -1,19 +1,21 @@
 # Agent — Owner: C
 #
-# Agentic RAG subsystem: state management, tool execution, query routing,
-# error degradation, and LangGraph workflow.
+# Agentic RAG subsystem: state management, tool interfaces, query routing,
+# error degradation, and finite-state workflow.
 #
 # Exports:
-#   - AgentState and state helpers
-#   - Tool definitions, registry, and executor
-#   - QueryRouter, CircuitBreaker, FallbackChain
-#   - LangGraph workflow nodes and graph builder
+#   - AgentRunState + legacy AgentState
+#   - Four tool interfaces + ToolRegistry + ToolExecutor
+#   - AgentRouter (deterministic) + legacy QueryRouter + CircuitBreaker
+#   - AgentWorkflow (finite-state) + legacy LangGraph nodes
 
 from src.agent.state import (
     AgentAction,
+    AgentRunState,
     AgentState,
     AgentStatus,
     AgentStep,
+    append_step,
     initial_state,
     is_finished,
     set_answer,
@@ -21,28 +23,33 @@ from src.agent.state import (
     state_snapshot,
 )
 from src.agent.tools import (
+    AnswerVerifyTool,
     BaseTool,
-    CalculatorTool,
-    DirectAnswerTool,
+    DocumentSummaryTool,
     GraphSearchTool,
     ToolExecutor,
+    ToolProtocol,
     ToolRegistry,
     ToolResult,
     VectorSearchTool,
     create_default_tools,
 )
 from src.agent.router import (
+    AgentRouter,
     CircuitBreaker,
     CircuitBreakerOpenError,
     CircuitState,
     FallbackChain,
     FallbackEntry,
+    QueryCategory,
     QueryRouter,
     RouteDecision,
+    RouterResult,
     create_router_and_fallback,
     default_fallback_chain,
 )
 from src.agent.workflow import (
+    AgentWorkflow,
     build_agent_graph,
     generate_node,
     get_agent_graph,
@@ -56,6 +63,7 @@ from src.agent.workflow import (
 
 __all__ = [
     # State
+    "AgentRunState",
     "AgentState",
     "AgentStatus",
     "AgentAction",
@@ -65,17 +73,22 @@ __all__ = [
     "is_finished",
     "set_answer",
     "set_error",
+    "append_step",
     # Tools
+    "ToolProtocol",
     "BaseTool",
     "ToolResult",
     "ToolRegistry",
     "ToolExecutor",
     "VectorSearchTool",
     "GraphSearchTool",
-    "CalculatorTool",
-    "DirectAnswerTool",
+    "DocumentSummaryTool",
+    "AnswerVerifyTool",
     "create_default_tools",
     # Router
+    "AgentRouter",
+    "QueryCategory",
+    "RouterResult",
     "QueryRouter",
     "RouteDecision",
     "CircuitBreaker",
@@ -86,6 +99,7 @@ __all__ = [
     "default_fallback_chain",
     "create_router_and_fallback",
     # Workflow
+    "AgentWorkflow",
     "build_agent_graph",
     "get_agent_graph",
     "plan_node",

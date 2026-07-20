@@ -135,7 +135,7 @@ class TestReasonNode:
     async def test_reason_node_no_chunks(self):
         state = initial_state("query")
         result = await reason_node(state)
-        assert "No information retrieved" in result["reasoning_chain"][0]
+        assert "Retrieved 0 chunks" in result["reasoning_chain"][0]
 
 
 class TestGenerateNode:

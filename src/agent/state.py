@@ -2,18 +2,14 @@
 Agent State — Owner: C
 State management for agentic RAG workflows.
 
-Defines the state schema, reducer functions, and state machine transitions
-used by the LangGraph-based agentic RAG workflow.
-
-Design:
-  - AgentState is a TypedDict compatible with LangGraph's StateGraph.
-  - State transitions follow: plan → retrieve → reason → [tool_call] → generate → reflect.
-  - All accumulated data (chunks, entities, reasoning steps) lives in the state.
-  - Helper functions produce initial state and extract safe summaries for streaming.
+Two state models:
+  1. AgentRunState — lightweight finite-state agent (CURRENT, used by AgentWorkflow)
+  2. AgentState (Legacy) — LangGraph TypedDict (kept for backward compatibility)
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
@@ -31,7 +27,7 @@ class AgentStatus(str, Enum):
     WAITING_FOR_TOOL = "waiting_for_tool"
     COMPLETED = "completed"
     FAILED = "failed"
-    DEGRADED = "degraded"  # Completed but with fallback
+    DEGRADED = "degraded"
 
 
 class AgentAction(str, Enum):
@@ -46,99 +42,129 @@ class AgentAction(str, Enum):
     FINISH = "finish"
 
 
-# ── Agent Step ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# AgentRunState — current finite-state agent model
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class AgentRunState:
+    """Lightweight state for the finite-state agent workflow.
+
+    Fields:
+        query:          Original user query.
+        selected_tools: Tools chosen by the router for this query.
+        tool_results:   Accumulated results keyed by tool name.
+        steps:          Ordered list of completed workflow steps.
+        final_answer:   Generated answer (set after generate step).
+        max_steps:      Hard limit on workflow steps (default 4, no infinite loops).
+        current_step:   Current step counter.
+        status:         Current execution status.
+        errors:         Non-fatal errors collected during execution.
+    """
+
+    query: str = ""
+    selected_tools: List[str] = field(default_factory=list)
+    tool_results: Dict[str, Any] = field(default_factory=dict)
+    steps: List[str] = field(default_factory=list)
+    final_answer: Optional[str] = None
+    max_steps: int = 4
+    current_step: int = 0
+    status: str = "running"  # running | completed | failed
+    errors: List[str] = field(default_factory=list)
+
+    @property
+    def is_finished(self) -> bool:
+        """Has the agent reached a terminal state?"""
+        return self.status in ("completed", "failed")
+
+    @property
+    def is_max_steps_exceeded(self) -> bool:
+        """Has the agent exceeded its step budget?"""
+        return self.current_step > self.max_steps
+
+    def record_step(self, step_name: str) -> None:
+        """Record a completed workflow step."""
+        self.steps.append(step_name)
+        self.current_step += 1
+
+    def set_answer(self, answer: str) -> None:
+        """Set the final answer and mark completed."""
+        self.final_answer = answer
+        self.status = "completed"
+
+    def set_failed(self, error: str) -> None:
+        """Mark the agent as failed."""
+        self.errors.append(error)
+        self.status = "failed"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-compatible dict."""
+        return {
+            "query": self.query,
+            "selected_tools": self.selected_tools,
+            "tool_results": self.tool_results,
+            "steps": self.steps,
+            "final_answer": self.final_answer,
+            "max_steps": self.max_steps,
+            "current_step": self.current_step,
+            "status": self.status,
+            "errors": self.errors,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AgentState (Legacy) — LangGraph TypedDict for backward compatibility
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 class AgentStep(TypedDict, total=False):
-    """Record of a single agent reasoning step."""
+    """Record of a single agent reasoning step (legacy)."""
 
     step_number: int
-    action: str  # AgentAction value
-    thought: str  # The agent's reasoning for this step
-    tool_name: Optional[str]  # Tool called (if action == tool_call)
-    tool_input: Optional[Dict[str, Any]]  # Arguments to the tool
-    tool_output: Optional[str]  # Result from the tool
-    observation: Optional[str]  # What the agent observed
-    error: Optional[str]  # Error message if step failed
+    action: str
+    thought: str
+    tool_name: Optional[str]
+    tool_input: Optional[Dict[str, Any]]
+    tool_output: Optional[str]
+    observation: Optional[str]
+    error: Optional[str]
     duration_ms: float
-    timestamp: str  # ISO datetime
-
-
-# ── Main Agent State ───────────────────────────────────────────────────────
+    timestamp: str
 
 
 class AgentState(TypedDict, total=False):
-    """Complete state for an agentic RAG execution.
+    """Complete state for an agentic RAG execution (legacy LangGraph TypedDict)."""
 
-    This TypedDict is compatible with LangGraph's StateGraph. Each node
-    reads from and writes to specific keys. The graph framework merges
-    returned dicts using the reducers defined on each key.
-
-    Key groups:
-      - Core: query, plan, status
-      - Accumulated data: chunks, entities, reports, reasoning_chain
-      - Tool execution: tool_results, pending_tool, pending_tool_args
-      - Control flow: iteration_count, max_iterations, current_step_index
-      - Error handling: errors, fatal_error
-      - Result: answer, citations
-      - Messages: LangGraph's annotated message list (add_messages reducer)
-    """
-
-    # ── Core ──────────────────────────────────────────────────────────
     query: str
     original_query: str
-    plan: List[str]  # Sequence of action descriptions
-    status: str  # AgentStatus value
-
-    # ── Accumulated Data ──────────────────────────────────────────────
-    retrieved_chunks: List[Dict[str, Any]]  # Chunks from vector/hybrid search
-    graph_entities: List[Dict[str, Any]]  # Entities from graph search
-    community_reports: List[Dict[str, Any]]  # Community summary reports
-    reasoning_chain: List[str]  # Chain-of-thought trace
-    steps: List[AgentStep]  # Record of agent reasoning steps
-
-    # ── Control Flow ──────────────────────────────────────────────────
-    current_step_index: int  # Pointer into plan list
-    iteration_count: int  # Total agent iterations so far
-    max_iterations: int  # Hard stop at this count (default 10)
-    next_action: str  # AgentAction value for routing
-
-    # ── Tool Execution ────────────────────────────────────────────────
-    tool_results: Dict[str, Any]  # tool_name → tool output
-    pending_tool: Optional[str]  # Tool name currently being executed
-    pending_tool_args: Optional[Dict[str, Any]]  # Arguments for pending tool
-
-    # ── Error Handling ────────────────────────────────────────────────
-    errors: List[str]  # Non-fatal errors (logged but execution continues)
-    fatal_error: Optional[str]  # Fatal error (triggers immediate termination)
-    fallback_used: bool  # Whether fallback was activated
-
-    # ── Result ────────────────────────────────────────────────────────
-    answer: Optional[str]  # Final generated answer
-    citations: List[Dict[str, str]]  # Source citations: {chunk_id, document_id, snippet}
-
-    # ── LangGraph Integration ─────────────────────────────────────────
+    plan: List[str]
+    status: str
+    retrieved_chunks: List[Dict[str, Any]]
+    graph_entities: List[Dict[str, Any]]
+    community_reports: List[Dict[str, Any]]
+    reasoning_chain: List[str]
+    steps: List[AgentStep]
+    current_step_index: int
+    iteration_count: int
+    max_iterations: int
+    next_action: str
+    tool_results: Dict[str, Any]
+    pending_tool: Optional[str]
+    pending_tool_args: Optional[Dict[str, Any]]
+    errors: List[str]
+    fatal_error: Optional[str]
+    fallback_used: bool
+    answer: Optional[str]
+    citations: List[Dict[str, str]]
     messages: Annotated[Sequence, add_messages]  # type: ignore[valid-type]
 
 
-# ── State factory ──────────────────────────────────────────────────────────
+# ── Legacy helpers ──────────────────────────────────────────────────────────
 
 
-def initial_state(
-    query: str,
-    max_iterations: int = 10,
-    **overrides: Any,
-) -> AgentState:
-    """Create a fresh AgentState for a new agent run.
-
-    Args:
-        query: The user's natural-language query.
-        max_iterations: Maximum number of agent reasoning loops.
-        **overrides: Additional state key-value pairs to set.
-
-    Returns:
-        A new AgentState dict ready for LangGraph invocation.
-    """
+def initial_state(query: str, max_iterations: int = 10, **overrides: Any) -> AgentState:
+    """Create a fresh AgentState for a new agent run (legacy)."""
     state: AgentState = {
         "query": query,
         "original_query": query,
@@ -167,14 +193,8 @@ def initial_state(
     return state
 
 
-# ── State helpers ──────────────────────────────────────────────────────────
-
-
 def state_snapshot(state: AgentState) -> Dict[str, Any]:
-    """Extract a safe-to-serialize summary of the current state.
-
-    Used for streaming events — avoids leaking internal objects.
-    """
+    """Extract a safe-to-serialize summary of the current state (legacy)."""
     return {
         "status": state.get("status"),
         "query": state.get("query", "")[:100],
@@ -193,7 +213,7 @@ def state_snapshot(state: AgentState) -> Dict[str, Any]:
 
 
 def is_finished(state: AgentState) -> bool:
-    """Check if the agent has reached a terminal state."""
+    """Check if the agent has reached a terminal state (legacy)."""
     status = state.get("status", "")
     if status in (AgentStatus.COMPLETED.value, AgentStatus.FAILED.value, AgentStatus.DEGRADED.value):
         return True
@@ -205,14 +225,14 @@ def is_finished(state: AgentState) -> bool:
 
 
 def append_step(state: AgentState, step: AgentStep) -> AgentState:
-    """Append a reasoning step and return updated state."""
+    """Append a reasoning step and return updated state (legacy)."""
     steps = list(state.get("steps", []))
     steps.append(step)
     return {**state, "steps": steps, "iteration_count": state.get("iteration_count", 0) + 1}  # type: ignore[typeddict-item]
 
 
 def set_error(state: AgentState, error: str, fatal: bool = False) -> AgentState:
-    """Record an error in the state."""
+    """Record an error in the state (legacy)."""
     errors = list(state.get("errors", []))
     errors.append(error)
     update: Dict[str, Any] = {"errors": errors}
@@ -222,13 +242,6 @@ def set_error(state: AgentState, error: str, fatal: bool = False) -> AgentState:
     return {**state, **update}  # type: ignore[typeddict-item]
 
 
-def set_answer(
-    state: AgentState, answer: str, citations: Optional[List[Dict[str, str]]] = None
-) -> AgentState:
-    """Set the final answer and mark completed."""
-    return {
-        **state,  # type: ignore[typeddict-item]
-        "answer": answer,
-        "citations": citations or [],
-        "status": AgentStatus.COMPLETED.value,
-    }
+def set_answer(state: AgentState, answer: str, citations: Optional[List[Dict[str, str]]] = None) -> AgentState:
+    """Set the final answer and mark completed (legacy)."""
+    return {**state, "answer": answer, "citations": citations or [], "status": AgentStatus.COMPLETED.value}  # type: ignore[typeddict-item]
