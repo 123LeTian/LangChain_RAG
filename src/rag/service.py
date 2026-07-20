@@ -20,7 +20,10 @@ from src.models.rag import (
     RAGPipelineConfig,
     RAGQuery,
     RAGResponse,
+    RAGStatus,
     StrategyType,
+    StreamEvent,
+    StreamEventType,
 )
 from src.rag.base import (
     GeneratorProtocol,
@@ -43,48 +46,6 @@ from src.rag.trace import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ── RAG Status (if not in models) ─────────────────────────────────────────
-
-class RAGStatus:
-    """Pipeline status constants."""
-    SUCCESS = "success"
-    PARTIAL = "partial"
-    FAILURE = "failure"
-
-
-# ── Simplified streaming event types ──────────────────────────────────────
-
-class StreamEventType:
-    """Stream event type constants for the RAG pipeline."""
-    RETRIEVAL_START = "retrieval_start"
-    RETRIEVAL_END = "retrieval_end"
-    RERANK = "rerank"
-    GENERATION_START = "generation_start"
-    TOKEN = "token"
-    SOURCE = "source"
-    DONE = "done"
-    ERROR = "error"
-    AGENT_STEP = "agent_step"
-    AGENT_TOOL_CALL = "agent_tool_call"
-    AGENT_TOOL_RESULT = "agent_tool_result"
-
-
-class StreamEvent:
-    """A single streaming event from the RAG pipeline."""
-
-    def __init__(self, event_type: str, data: Any = None, trace_id: Optional[str] = None) -> None:
-        self.type = event_type
-        self.data = data
-        self.trace_id = trace_id
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "type": self.type,
-            "data": self.data,
-            "trace_id": self.trace_id,
-        }
 
 
 # ── Service ───────────────────────────────────────────────────────────────
@@ -179,7 +140,11 @@ class RAGService:
         try:
             strategy = self._get_strategy(strategy_type)
         except StrategyNotFoundError:
-            yield StreamEvent(StreamEventType.ERROR, data="No strategy available", trace_id=trace.trace_id)
+            yield StreamEvent(
+                event_type=StreamEventType.ERROR,
+                data={"message": "No strategy available"},
+                trace_id=trace.trace_id,
+            )
             return
 
         # Try streaming if the strategy supports it
@@ -189,12 +154,16 @@ class RAGService:
                 async for event in stream_method(query):
                     event.trace_id = trace.trace_id
                     yield event
-                    if event.type == StreamEventType.DONE:
+                    if event.event_type == StreamEventType.DONE:
                         self._trace_store.save(trace)
                         return
             except Exception as exc:
                 logger.warning("Stream failed, falling back: %s", exc)
-                yield StreamEvent(StreamEventType.ERROR, data=str(exc), trace_id=trace.trace_id)
+                yield StreamEvent(
+                    event_type=StreamEventType.ERROR,
+                    data={"message": str(exc)},
+                    trace_id=trace.trace_id,
+                )
 
         # Non-streaming fallback
         response = await self.run(query)
@@ -202,14 +171,20 @@ class RAGService:
         if response.context:
             for chunk in response.context.chunks:
                 yield StreamEvent(
-                    StreamEventType.SOURCE,
+                    event_type=StreamEventType.SOURCE,
                     data={"chunk_id": chunk.chunk_id, "content": chunk.content[:200]},
                     trace_id=trace.trace_id,
                 )
         yield StreamEvent(
-            StreamEventType.TOKEN, data=response.answer, trace_id=trace.trace_id
+            event_type=StreamEventType.TOKEN,
+            data={"token": response.answer},
+            trace_id=trace.trace_id,
         )
-        yield StreamEvent(StreamEventType.DONE, data={}, trace_id=trace.trace_id)
+        yield StreamEvent(
+            event_type=StreamEventType.DONE,
+            data={},
+            trace_id=trace.trace_id,
+        )
         self._trace_store.save(trace)
 
     # ── Strategy management ────────────────────────────────────────────
@@ -300,7 +275,7 @@ class RAGService:
                     strategy = self._get_strategy(fb_type)
                     response = await strategy.run(query)
                     response.trace_id = trace.trace_id
-                    response.metadata["status"] = RAGStatus.PARTIAL
+                    response.metadata["status"] = RAGStatus.PARTIAL.value
                     response.metadata["fallback_from"] = query.strategy.value
                     response.metadata["fallback_errors"] = errors
                     response.error = (

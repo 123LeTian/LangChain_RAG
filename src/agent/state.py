@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 
 from langgraph.graph.message import add_messages
 

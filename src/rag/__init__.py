@@ -9,6 +9,11 @@
 #   - Trace system (observability)
 #   - All strategies (via strategies/ package)
 
+from src.models.rag import (
+    RAGStatus,
+    StreamEvent,
+    StreamEventType,
+)
 from src.rag.base import (
     EmbedderProtocol,
     GeneratorProtocol,
@@ -26,8 +31,6 @@ from src.rag.registry import (
 )
 from src.rag.service import (
     RAGService,
-    StreamEvent,
-    StreamEventType,
     create_rag_service,
 )
 from src.rag.trace import (
@@ -61,6 +64,7 @@ __all__ = [
     "create_rag_service",
     "StreamEvent",
     "StreamEventType",
+    "RAGStatus",
     # Trace
     "Trace",
     "TraceSpan",

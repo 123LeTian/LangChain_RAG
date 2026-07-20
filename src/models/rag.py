@@ -13,6 +13,7 @@ Unified data contract supporting all five RAG paradigms:
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -32,6 +33,17 @@ class StrategyType(str, Enum):
     MODULAR = "modular"
     GRAPH_RAG = "graph_rag"
     AGENTIC = "agentic"
+
+
+# ── Status Enum ────────────────────────────────────────────────────────────
+
+
+class RAGStatus(str, Enum):
+    """Pipeline execution status for RAGResponse."""
+
+    SUCCESS = "success"
+    PARTIAL = "partial"   # Completed but through fallback
+    FAILURE = "failure"   # All strategies exhausted
 
 
 # ── Source & Chunk ─────────────────────────────────────────────────────────
@@ -167,6 +179,34 @@ class RAGResponse(BaseModel):
         default=None, description="Error message if the pipeline failed gracefully"
     )
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Streaming Events ──────────────────────────────────────────────────────
+
+
+class StreamEventType(str, Enum):
+    """Stream event type constants for the RAG pipeline."""
+
+    RETRIEVAL_START = "retrieval_start"
+    RETRIEVAL_END = "retrieval_end"
+    RERANK = "rerank"
+    GENERATION_START = "generation_start"
+    TOKEN = "token"
+    SOURCE = "source"
+    DONE = "done"
+    ERROR = "error"
+    AGENT_STEP = "agent_step"
+    AGENT_TOOL_CALL = "agent_tool_call"
+    AGENT_TOOL_RESULT = "agent_tool_result"
+
+
+class StreamEvent(BaseModel):
+    """A single streaming event from the RAG pipeline."""
+
+    event_type: StreamEventType = Field(..., description="Type of the streaming event")
+    data: Dict[str, Any] = Field(default_factory=dict, description="Event payload")
+    trace_id: Optional[str] = Field(default=None, description="Associated trace identifier")
+    timestamp: float = Field(default_factory=time.time)
 
 
 # ── Pipeline Config ───────────────────────────────────────────────────────

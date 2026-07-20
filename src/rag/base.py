@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
-from src.models.rag import RAGContext, RAGQuery, RAGResponse
+from src.models.rag import RAGContext, RAGQuery, RAGResponse, StrategyType
 
 
 # ── Protocol Interfaces for external dependencies ──────────────────────────
@@ -175,7 +175,7 @@ class RAGStrategyBase(ABC):
         return self._name
 
     @property
-    def strategy_type(self) -> "strategy_type":  # noqa: F821
+    def strategy_type(self) -> StrategyType:
         """Return the StrategyType enum value for this strategy."""
         raise NotImplementedError("Subclasses must define strategy_type")
 
