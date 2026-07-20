@@ -1,6 +1,6 @@
 ﻿"""文本向量化模块。"""
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 import hashlib
 import numpy as np
 
@@ -27,12 +27,23 @@ class BaseEmbedder(ABC):
 
 
 class HuggingFaceEmbedder(BaseEmbedder):
-    """HuggingFace 本地向量化器（中文推荐 bge-small-zh-v1.5）。
-    首次运行自动下载模型，之后纯本地推理。
+    """延迟加载的 HuggingFace 本地向量化器。
+
+    ``sentence-transformers`` 仅在第一次对非空文本执行向量化时导入，
+    因此基础检索功能不需要安装该可选依赖。
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
+    def __init__(
+        self,
+        model_name: str = "BAAI/bge-small-zh-v1.5",
+        device: Optional[str] = None,
+        batch_size: int = 32,
+    ):
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
         self._model_name = model_name
+        self._device = device
+        self._batch_size = batch_size
         self._model = None
         self._dim = 512
 
@@ -44,27 +55,46 @@ class HuggingFaceEmbedder(BaseEmbedder):
     def dimension(self) -> int:
         return self._dim
 
+    @property
+    def device(self) -> Optional[str]:
+        return self._device
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
+
     def _get_model(self):
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-            except ImportError:
-                raise ImportError("请安装: pip install sentence-transformers")
-            print(f"  正在加载 Embedding 模型 {self._model_name}...")
-            self._model = SentenceTransformer(self._model_name)
+            except ImportError as exc:
+                raise ImportError(
+                    "HuggingFaceEmbedder 需要可选依赖 'sentence-transformers'；"
+                    "请执行: pip install -r requirements-bge.txt"
+                ) from exc
+
+            model_options = {}
+            if self._device is not None:
+                model_options["device"] = self._device
+            self._model = SentenceTransformer(self._model_name, **model_options)
             self._dim = self._model.get_sentence_embedding_dimension()
-            print(f"  模型加载完成，维度: {self._dim}")
         return self._model
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
         model = self._get_model()
-        embeddings = model.encode(texts, normalize_embeddings=True)
-        return embeddings.tolist()
+        embeddings = model.encode(
+            texts,
+            batch_size=self._batch_size,
+            normalize_embeddings=True,
+        )
+        if hasattr(embeddings, "tolist"):
+            return embeddings.tolist()
+        return [list(embedding) for embedding in embeddings]
 
     def embed_query(self, query: str) -> List[float]:
-        model = self._get_model()
-        embedding = model.encode([query], normalize_embeddings=True)
-        return embedding[0].tolist()
+        return self.embed_texts([query])[0]
 
 class HashEmbedder(BaseEmbedder):
     """哈希向量器（无需外部依赖，仅用于测试和演示）。
@@ -131,45 +161,4 @@ class OpenAIEmbedder(BaseEmbedder):
         resp = client.embeddings.create(model=self._model, input=texts)
         self._dim = len(resp.data[0].embedding)
         return [d.embedding for d in resp.data]
-
-
-class HuggingFaceEmbedder(BaseEmbedder):
-    """HuggingFace 本地向量化器（推荐中文用 bge-small-zh）。
-    首次运行会自动下载模型，之后纯本地推理，不调 API。
-    """
-
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
-        self._model_name = model_name
-        self._model = None
-        self._dim = 512
-
-    @property
-    def model_name(self) -> str:
-        return self._model_name
-
-    @property
-    def dimension(self) -> int:
-        return self._dim
-
-    def _get_model(self):
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError:
-                raise ImportError("请安装: pip install sentence-transformers")
-            print(f"  正在加载 Embedding 模型 {self._model_name}（首次需下载）...")
-            self._model = SentenceTransformer(self._model_name)
-            self._dim = self._model.get_sentence_embedding_dimension()
-            print(f"  模型加载完成，维度: {self._dim}")
-        return self._model
-
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        model = self._get_model()
-        embeddings = model.encode(texts, normalize_embeddings=True)
-        return embeddings.tolist()
-
-    def embed_query(self, query: str) -> List[float]:
-        model = self._get_model()
-        embedding = model.encode([query], normalize_embeddings=True)
-        return embedding[0].tolist()
 

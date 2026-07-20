@@ -1,5 +1,30 @@
-﻿.env
+.env
+.env.*
+!.env.example
+
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local documents and generated artifacts
 documents/
 *.pdf
+
+# HuggingFace/model caches
+.cache/
+.huggingface/
+huggingface/
+models/
+
+# Chroma and local database state
+.chroma/
+chroma/
+chroma_db/
+chroma.sqlite3
+*.db
+*.sqlite
+*.sqlite3
