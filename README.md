@@ -1,6 +1,6 @@
 # LangChain RAG
 
-一个面向学习、验证与后续集成的模块化 Python RAG 项目。当前已完成知识库、摄入、检索、Naive/Advanced/Modular/Agentic RAG、评测基线、Graph Index 基础设施以及 Vue 3 前端骨架。
+一个面向学习、验证与后续集成的模块化 Python RAG 项目。当前 `main` 已完成知识库、摄入、检索、Naive/Advanced/Modular/Graph/Agentic RAG、Vector/Graph Tool、五模式离线最终评测、FastAPI 集成以及 Vue 3 前端骨架。
 
 ## 当前状态
 
@@ -21,15 +21,20 @@
 | D1 Evaluation Dataset | D | 完成 | `datasets/evaluation/rag_eval_v1.jsonl`，24 条 JSONL 样例 |
 | D2 Naive Baseline Eval | D | 完成 | JSONL 加载校验、Hit@K、MRR、Latency、mock/real runner、结构化报告 |
 | D3 Graph Index | D | 完成 | Graph 模型、规则抽取、NetworkX 索引、内存仓储、社区发现、CommunityReport |
+| D4 GraphRAG | D | 完成 | Local entity-relation search、Global community-report search、Citation、Trace、GraphRAGStrategy |
+| D5 Graph Tool | D | 完成 | `graph_search` 标准 Tool 接口、参数校验、ToolResult Adapter、Registry/Executor 合同测试 |
+| D6 Final Evaluation | D | 完成 | 五模式 runner、Answer/System/Graph/Agent 指标、JSON/Markdown/CSV 报告、回归检查 |
 | Frontend Skeleton | A | 完成 | Vue 3 + Vite 前端骨架、Chat/Evaluation/Graph/Knowledge/Trace 页面 |
 
 ## 测试证据
 
 | 检查 | 结果 |
 | --- | --- |
-| `python -m pytest tests/unit/graph -q` | 17 passed |
-| `python -m pytest tests/unit/evaluation -q` | 15 passed |
-| `python -m pytest -q` | 578 passed, 1 warning |
+| `python -m pytest tests/unit/graph -q` | 36 passed, 1 warning |
+| `python -m pytest tests/unit/evaluation -q` | 34 passed |
+| `python -m pytest tests/unit/rag/test_graph_rag_strategy.py -q` | 6 passed, 1 warning |
+| `python -m pytest tests/contract/test_graph_tool_contract.py -q` | 4 passed, 1 warning |
+| `python -m pytest -q` | 628 passed, 1 warning |
 
 当前已知提示：Windows 环境下 pytest 退出后偶发临时目录清理 `WinError 5` 提示，但测试命令退出码为 0。
 
@@ -99,13 +104,22 @@ python -m pytest tests/unit/evaluation -q
 # 运行 D3 Graph Index 专项测试
 python -m pytest tests/unit/graph -q
 
+# 运行 D4 GraphRAG 专项测试
+python -m pytest tests/unit/rag/test_graph_rag_strategy.py -q
+
+# 运行 D5 Graph Tool 合同测试
+python -m pytest tests/contract/test_graph_tool_contract.py -q
+
 # 离线生成 Naive baseline 报告
 python -m src.evaluation.runner --dataset datasets/evaluation/rag_eval_v1.jsonl --mode naive --mock
+
+# 离线生成 D6 五模式最终评测报告
+python -m src.evaluation.runner --dataset datasets/evaluation/rag_eval_v1.jsonl --modes naive advanced modular graph agentic --mock --output datasets/evaluation/reports/final_evaluation.json --markdown docs/evaluation-report.md --csv datasets/evaluation/reports/final_evaluation.csv
 ```
 
-## D3 Graph Index 说明
+## GraphRAG 与 Graph Tool 说明
 
-D3 提供可被后续 GraphRAG Local / Global Search 复用的索引基础，但尚未实现 D4/D5 检索能力。当前 MVP 使用确定性规则抽取，不依赖真实 API Key、外部 LLM、远程 Neo4j 或本地模型缓存。
+当前 GraphRAG MVP 使用确定性规则抽取、NetworkX 图索引和内存图仓储，不依赖真实 API Key、外部 LLM、远程 Neo4j 或本地模型缓存。
 
 追溯链路：
 
@@ -114,6 +128,23 @@ ChunkRecord -> GraphSourceRef -> GraphEntity / GraphRelationship -> GraphCommuni
 ```
 
 节点和边均保留 `document_id + chunk_id`，报告会聚合社区内实体与关系的源 Chunk 引用。
+
+已完成能力：
+
+- `GraphRetriever.local_search()`：面向实体、关系和一跳邻居的局部图检索。
+- `GraphRetriever.global_search()`：面向 CommunityReport 的全局主题检索。
+- `GraphRAGStrategy`：接入统一 `RAGStrategy`，返回 `RAGResult`、Citation、Trace 和 warning。
+- `GraphSearchTool`：提供标准 `graph_search(query, kb_id, scope, top_k)` Tool 接口，兼容 C 的 `ToolRegistry` / `ToolExecutor`。
+
+## 最终评测报告
+
+D6 已生成五模式离线最终评测报告：
+
+- JSON：`datasets/evaluation/reports/final_evaluation.json`
+- Markdown：`docs/evaluation-report.md`
+- CSV：`datasets/evaluation/reports/final_evaluation.csv`
+
+当前最终评测使用 `mock_*` runner，用于验证五模式评测链路、报告结构、指标计算和回归检查。它不代表真实 LLM/RAG 线上质量；接入真实 `RAGService`、知识库和模型环境后，应重新运行最终评测。
 
 ## 详细进度
 
