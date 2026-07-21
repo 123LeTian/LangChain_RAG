@@ -1,19 +1,79 @@
-﻿from .embeddings import BaseEmbedder, HashEmbedder, OpenAIEmbedder
-from .vector_index import BaseVectorIndex, InMemoryVectorIndex, ChromaVectorIndex
-from .retriever import Retriever
+﻿from .embeddings import BaseEmbedder, HashEmbedder, OpenAIEmbedder, HuggingFaceEmbedder
+from .vector_index import (
+    BaseVectorIndex,
+    ChromaVectorIndex,
+    InMemoryVectorIndex,
+    VectorIndexProtocol,
+)
+from .retriever import Retriever, VectorRetriever
+from .adapter import (
+    MissingKnowledgeBaseError,
+    RetrieverAdapterError,
+    VectorRetrieverAdapter,
+)
 from .reranker import BaseReranker, SimpleReranker, CrossEncoderReranker
 from .compressor import ContextCompressor
 from .citation_builder import CitationBuilder
-from .hybrid import HybridRetriever, KeywordSearcher
-from .protocols import KnowledgeRepository, SimpleKnowledgeRepository
+from .hybrid import HybridRetrievalError, HybridRetriever, KeywordSearcher
+from .multi_query import (
+    MultiQueryRetrievalError,
+    QueryRetrievalReport,
+    merge_retrieval_hits,
+    retrieve_queries,
+)
+from .query_rewriter import QueryRewriter, QueryRewriterProtocol
+from .vector_tool import (
+    CToolResultAdapter,
+    InvalidToolArgumentsError,
+    VectorSearchExecutionError,
+    VectorSearchTool,
+    VectorSearchToolError,
+    register_vector_search_tool,
+    vector_search,
+)
+from .protocols import (
+    KnowledgeRepository,
+    RetrieverProtocol,
+    SimpleKnowledgeRepository,
+)
 
 __all__ = [
-    "BaseEmbedder", "HashEmbedder", "OpenAIEmbedder",
-    "BaseVectorIndex", "InMemoryVectorIndex", "ChromaVectorIndex",
+    "BaseEmbedder",
+    "HashEmbedder",
+    "OpenAIEmbedder",
+    "HuggingFaceEmbedder",
+    "BaseVectorIndex",
+    "InMemoryVectorIndex",
+    "ChromaVectorIndex",
+    "VectorIndexProtocol",
     "Retriever",
-    "BaseReranker", "SimpleReranker", "CrossEncoderReranker",
+    "VectorRetriever",
+    "VectorRetrieverAdapter",
+    "RetrieverAdapterError",
+    "MissingKnowledgeBaseError",
+    "RetrieverProtocol",
+    "BaseReranker",
+    "SimpleReranker",
+    "CrossEncoderReranker",
     "ContextCompressor",
     "CitationBuilder",
-    "HybridRetriever", "KeywordSearcher",
-    "KnowledgeRepository", "SimpleKnowledgeRepository",
+    "HybridRetrievalError",
+    "HybridRetriever",
+    "KeywordSearcher",
+    "QueryRewriter",
+    "QueryRewriterProtocol",
+    "MultiQueryRetrievalError",
+    "QueryRetrievalReport",
+    "merge_retrieval_hits",
+    "retrieve_queries",
+    "CToolResultAdapter",
+    "InvalidToolArgumentsError",
+    "VectorSearchExecutionError",
+    "VectorSearchTool",
+    "VectorSearchToolError",
+    "register_vector_search_tool",
+    "vector_search",
+    "KnowledgeRepository",
+    "SimpleKnowledgeRepository",
 ]
+

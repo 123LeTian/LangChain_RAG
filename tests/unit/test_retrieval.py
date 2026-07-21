@@ -36,7 +36,7 @@ def test_vector_index():
     index.add_chunks(chunks)
     assert index.count() == 3
     qvec = emb.embed_query("LangChain 框架")
-    hits = index.search(qvec, top_k=2)
+    hits = index.search(qvec, kb_id="kb1", top_k=2)
     assert len(hits) == 2
     assert hits[0].rank == 0
     print("test_vector_index passed")
