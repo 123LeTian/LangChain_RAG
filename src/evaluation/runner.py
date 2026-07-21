@@ -16,6 +16,8 @@ from src.models.rag import RAGMode, RAGRequest
 
 DEFAULT_DATASET_PATH = "datasets/evaluation/rag_eval_v1.jsonl"
 DEFAULT_REPORT_PATH = "datasets/evaluation/reports/naive_baseline.json"
+DEFAULT_FINAL_REPORT_PATH = "datasets/evaluation/reports/final_evaluation.json"
+DEFAULT_FINAL_MARKDOWN_PATH = "docs/evaluation-report.md"
 
 
 class MockRAGRunner:
@@ -181,7 +183,73 @@ def _serialize_source_like(value: Any) -> Dict[str, Any]:
     return payload
 
 
+async def run_final_evaluation(
+    *,
+    dataset_path: str | Path,
+    modes: Sequence[str],
+    use_mock: bool,
+    output_path: str | Path,
+    markdown_path: str | Path | None = None,
+    csv_path: str | Path | None = None,
+    kb_id: str = "default",
+    top_k: int = 5,
+    service: Any | None = None,
+) -> Dict[str, Any]:
+    """Run the D6 multi-mode evaluation and write final reports."""
+
+    from src.evaluation.multi_mode_runner import MultiModeEvaluationRunner, create_runner
+    from src.evaluation.report import (
+        write_csv_summary,
+        write_markdown_report,
+        write_report,
+    )
+
+    def runner_factory(mode: str) -> Any:
+        return create_runner(
+            mode,
+            use_mock=use_mock,
+            service=service,
+            kb_id=kb_id,
+            top_k=top_k,
+        )
+
+    report = await MultiModeEvaluationRunner(
+        dataset_path=str(dataset_path),
+        modes=modes,
+        runner_factory=runner_factory,
+    ).run()
+    write_report(report, output_path)
+    if markdown_path is not None:
+        write_markdown_report(report, markdown_path)
+    if csv_path is not None:
+        write_csv_summary(report, csv_path)
+    return report
+
+
 async def _main_async(args: argparse.Namespace) -> int:
+    if args.modes:
+        if not args.mock and args.service is not None:
+            service = args.service
+        elif not args.mock:
+            raise SystemExit(
+                "Multi-mode CLI requires --mock unless a configured RAGService "
+                "is injected by application code."
+            )
+        else:
+            service = None
+        await run_final_evaluation(
+            dataset_path=args.dataset,
+            modes=args.modes,
+            use_mock=args.mock,
+            output_path=args.output,
+            markdown_path=args.markdown,
+            csv_path=args.csv,
+            kb_id=args.kb_id,
+            top_k=args.top_k,
+            service=service,
+        )
+        return 0
+
     if not args.mock:
         raise SystemExit(
             "The CLI needs --mock unless a configured RAGService is supplied by "
@@ -197,13 +265,51 @@ async def _main_async(args: argparse.Namespace) -> int:
 
 
 def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run a Naive RAG baseline evaluation.")
+    from src.evaluation.multi_mode_runner import ALL_EVAL_MODES
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run RAG evaluation. Default: D2 naive baseline report. "
+            "Use --modes for D6 multi-mode final evaluation."
+        )
+    )
     parser.add_argument("--dataset", default=DEFAULT_DATASET_PATH)
     parser.add_argument("--mode", default="naive", choices=["naive"])
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=list(ALL_EVAL_MODES),
+        help="Run final multi-mode evaluation for the listed modes.",
+    )
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--output", default=DEFAULT_REPORT_PATH)
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Report JSON path. Defaults to naive_baseline.json or final_evaluation.json.",
+    )
+    parser.add_argument(
+        "--markdown",
+        default=None,
+        help="Optional Markdown report path (final evaluation only).",
+    )
+    parser.add_argument(
+        "--csv",
+        default=None,
+        help="Optional CSV summary path (final evaluation only).",
+    )
+    parser.add_argument("--kb-id", default="default")
     args = parser.parse_args(argv)
+
+    if args.modes:
+        if args.output is None:
+            args.output = DEFAULT_FINAL_REPORT_PATH
+        if args.markdown is None:
+            args.markdown = DEFAULT_FINAL_MARKDOWN_PATH
+    else:
+        if args.output is None:
+            args.output = DEFAULT_REPORT_PATH
+    args.service = None
     return asyncio.run(_main_async(args))
 
 
@@ -213,10 +319,13 @@ if __name__ == "__main__":
 
 __all__ = [
     "DEFAULT_DATASET_PATH",
+    "DEFAULT_FINAL_MARKDOWN_PATH",
+    "DEFAULT_FINAL_REPORT_PATH",
     "DEFAULT_REPORT_PATH",
     "MockRAGRunner",
     "RAGServiceNaiveRunner",
     "build_sample_result",
     "main",
     "run_evaluation",
+    "run_final_evaluation",
 ]
