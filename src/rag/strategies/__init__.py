@@ -11,7 +11,12 @@ from src.rag.strategies.modular import (
     ModularRAGStrategy,
     validate_module_config,
 )
-from src.rag.strategies.agentic import AgenticRAGStrategy
+
+# Agentic has transitive dep on langgraph (optional) — guard import
+try:
+    from src.rag.strategies.agentic import AgenticRAGStrategy
+except ImportError:
+    AgenticRAGStrategy = None  # type: ignore[assignment]
 
 # D-owned strategy class (import when implemented):
 # from src.rag.strategies.graph_rag import GraphRAGStrategy
