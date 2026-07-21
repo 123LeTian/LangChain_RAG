@@ -55,3 +55,6 @@ chroma.sqlite3
 *.db
 *.sqlite
 *.sqlite3
+
+# Runtime data (KB persistence)
+data/

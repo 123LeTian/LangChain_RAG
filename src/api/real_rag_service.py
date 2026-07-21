@@ -1,9 +1,9 @@
-﻿"""Real RAG service — DeepSeek LLM + HuggingFace embeddings + vector retrieval.
+"""Real RAG service — DeepSeek LLM + HuggingFace embeddings + hybrid retrieval + query rewriting.
 
 Key design:
   - Lazy init runs in a background thread (non-blocking)
   - Simple chat questions bypass RAG and go straight to DeepSeek
-  - Document questions go through full retrieval pipeline
+  - Document questions go through: query rewrite -> hybrid retrieval -> rerank -> generate
 """
 from __future__ import annotations
 
@@ -64,6 +64,7 @@ class RealRAGService:
         self.compressor = None
         self.citation_builder = None
         self.build_naive_prompt = None
+        self.query_rewriter = None
 
     def _do_init(self):
         """Synchronous initialization — runs in a thread."""
@@ -76,6 +77,7 @@ class RealRAGService:
         )
         from src.rag.naive_support import build_naive_prompt
         from langchain_openai import ChatOpenAI
+        from src.api.llm_query_rewriter import LLMQueryRewriter
 
         project_root = Path(__file__).resolve().parents[2]
         docs_dir = project_root / "documents"
@@ -140,6 +142,9 @@ class RealRAGService:
             max_tokens=1000,
         )
 
+        # Query rewriter for better retrieval
+        self.query_rewriter = LLMQueryRewriter(llm=self.llm)
+
         self._initialized = True
         print(f"[RAG] Initialization complete!", flush=True)
 
@@ -150,6 +155,7 @@ class RealRAGService:
         async with self._init_lock:
             if self._initialized:
                 return
+            self.retriever = None
             print("[RAG] Starting initialization (in background thread)...", flush=True)
             await asyncio.to_thread(self._do_init)
 
@@ -165,7 +171,7 @@ class RealRAGService:
         )
 
     async def query(self, request: Any) -> RAGResult:
-        """Process a RAG query."""
+        """Process a RAG query with query rewriting + hybrid retrieval + DeepSeek."""
         query_text = request.query if hasattr(request, "query") else str(request)
         mode = request.mode if hasattr(request, "mode") else RAGMode.NAIVE
         trace_id = uuid.uuid4().hex[:12]
@@ -198,15 +204,37 @@ class RealRAGService:
         print(f"[RAG] Document question: {query_text[:50]}", flush=True)
         await self._ensure_init()
 
-        # 1. Retrieve (in thread to avoid blocking)
+        # 0. Query rewriting — expand vague queries into precise terms
         t0 = time.time()
-        hits = await asyncio.to_thread(self.retriever.retrieve, query_text, 10)
+        rewritten_queries = await self.query_rewriter.rewrite(query_text, max_queries=3)
+        print(f"[RAG] Rewritten queries: {rewritten_queries}", flush=True)
+        events.append(TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.REWRITE,
+            duration_ms=round((time.time() - t0) * 1000, 1),
+            input_summary=query_text[:100],
+            output_summary=f"Rewritten to {len(rewritten_queries)} queries: {rewritten_queries}",
+        ))
+
+        # 1. Retrieve for ALL rewritten queries (merge results)
+        t0 = time.time()
+        all_hits = []
+        seen_chunks = set()
+        for rq in rewritten_queries:
+            hits = await asyncio.to_thread(self.retriever.retrieve, rq, 10)
+            for h in hits:
+                if h.chunk.id not in seen_chunks:
+                    seen_chunks.add(h.chunk.id)
+                    all_hits.append(h)
+        # Sort by score and take top 10
+        all_hits.sort(key=lambda h: -h.score)
+        hits = all_hits[:10]
         events.append(TraceEvent(
             trace_id=trace_id,
             stage=TraceStage.RETRIEVE,
             duration_ms=round((time.time() - t0) * 1000, 1),
-            input_summary=query_text[:100],
-            output_summary=f"Retrieved {len(hits)} chunks",
+            input_summary=f"{len(rewritten_queries)} queries",
+            output_summary=f"Retrieved {len(hits)} unique chunks",
         ))
 
         # 2. Rerank
@@ -239,7 +267,7 @@ class RealRAGService:
                 text=h.chunk.text[:200],
                 score=h.score,
                 rank=h.rank,
-                retriever="vector",
+                retriever="hybrid",
                 metadata=h.chunk.metadata,
             )
             for h in hits
