@@ -33,6 +33,9 @@
 # 基础依赖（RAG 核心 + Agent）
 pip install -r requirements.txt
 
+# 开发测试依赖（pytest + pytest-asyncio）
+pip install -r requirements-dev.txt
+
 # 可选：Chroma 向量库
 pip install -r requirements-chroma.txt
 
@@ -42,6 +45,8 @@ pip install -r requirements-bge.txt
 # 可选：OpenAI Embedding / LLM
 pip install -r requirements-openai.txt
 ```
+
+完整测试运行需要 `requirements-dev.txt`（提供 `pytest` 和 `pytest-asyncio`），否则 async 测试在干净环境中会失败。
 
 ## 架构
 

@@ -139,14 +139,34 @@
 | C8 | `9f8fce4` | `fix: resolve 4 Agentic RAG integration issues` |
 | 合并 | `d489213` | `Merge feature/c-orchestration-agent into main` |
 
+## 已知交付瑕疵
+
+### 1. `pytest-asyncio` 未纳入 `requirements.txt`
+
+`requirements.txt` 包含 `langgraph` 等运行时依赖，但不包含测试必需的 `pytest-asyncio`。干净环境只装 `requirements.txt + pytest` 会导致大量 async 测试因缺少 `pytest_asyncio` marker 而失败。
+
+**解决**：`requirements-dev.txt` 已提供 `pytest>=8.0` + `pytest-asyncio>=0.24`。运行测试前安装：
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### 2. Agentic RAG 的 GraphSearchTool 等待 D 提供真实后端
+
+- C 已完整实现：`GraphSearchTool`（`src/agent/tools.py`）包装 `GraphRetrieverProtocol`，与 `AgentWorkflow` 的降级逻辑（graph → vector）全部就绪。
+- 当前状态：无真实 `GraphRetrieverProtocol` 实现时，graph_search 必然失败并降级到 vector_search，降级路径有测试覆盖。
+- 依赖 D 交付：`src/graph/` 模块（`graph/retriever.py` 等）和 `GraphRAGStrategy`（`src/rag/strategies/graph_rag.py`）。
+- 不影响验收：C 的 Agentic 已满足 `vector_search` + `document_summary` + `answer_verify` 三类工具的可验收运行；graph 通道是"可接 D"而非"已完整跑通"。
+
 ## 质量证据
 
 | 检查 | 实际结果 |
 | --- | --- |
 | `python -m pytest tests/unit/rag/ tests/unit/agent/ -q` | **413 passed** (C 层) |
-| `python -m pytest tests/ -q` | **544 passed** (全量，2 个 B 层 PDF/DOCX 需可选依赖) |
-| Git 冲突标记 | main 合并后无冲突残留 |
+| `python -m pytest tests/ -q` | **546 passed** (全量，已安装 `requirements-dev.txt` 的 `pytest-asyncio`) |
+| 干净环境测试 | 需 `pip install -r requirements-dev.txt` 否则 async 测试因缺 `pytest-asyncio` 失败 |
 | `langgraph` 依赖 | 已在 `requirements.txt` 声明 `langgraph>=0.2.0`；源码延迟导入保护 |
+| GraphRAG 真实后端 | 等待 Owner D 提供 `GraphRetrieverProtocol` 实现和 `GraphRAGStrategy` |
 
 ## 待办事项
 
