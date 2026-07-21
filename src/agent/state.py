@@ -66,8 +66,10 @@ class AgentRunState:
     query: str = ""
     selected_tools: List[str] = field(default_factory=list)
     tool_results: Dict[str, Any] = field(default_factory=dict)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     steps: List[str] = field(default_factory=list)
     final_answer: Optional[str] = None
+    citations: List[Dict[str, str]] = field(default_factory=list)
     max_steps: int = 4
     current_step: int = 0
     status: str = "running"  # running | completed | failed
@@ -104,8 +106,10 @@ class AgentRunState:
             "query": self.query,
             "selected_tools": self.selected_tools,
             "tool_results": self.tool_results,
+            "tool_calls": self.tool_calls,
             "steps": self.steps,
             "final_answer": self.final_answer,
+            "citations": self.citations,
             "max_steps": self.max_steps,
             "current_step": self.current_step,
             "status": self.status,

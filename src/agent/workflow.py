@@ -170,6 +170,15 @@ class AgentWorkflow:
             except Exception as exc:
                 result = ToolResult(success=False, error=_sanitize_error(exc), tool_name=tool_name)
 
+            # ── Record per-tool-call metadata (criterion 3) ──
+            state.tool_calls.append({
+                "tool_name": tool_name,
+                "params_summary": _summarise_params(tool_name, kwargs),
+                "result_summary": _summarise_tool_result(result),
+                "duration_ms": result.duration_ms,
+                "error": result.error,
+            })
+
             # ── Degradation: graph_search fails → try vector_search ──
             if not result.success and tool_name == "graph_search":
                 logger.warning("graph_search failed, degrading to vector_search: %s", result.error)
@@ -179,6 +188,14 @@ class AgentWorkflow:
                 # Fallback: try vector_search
                 try:
                     fb_result = await executor.execute("vector_search", query=state.query)
+                    # Record the fallback call (criterion 3)
+                    state.tool_calls.append({
+                        "tool_name": "vector_search",
+                        "params_summary": f"query={state.query[:60]}, top_k=5 (fallback from graph_search)",
+                        "result_summary": _summarise_tool_result(fb_result),
+                        "duration_ms": fb_result.duration_ms,
+                        "error": fb_result.error,
+                    })
                     if fb_result.success:
                         state.tool_results["vector_search"] = fb_result.data
                         state.tool_results["graph_search"] = None
@@ -273,6 +290,29 @@ class AgentWorkflow:
             )
 
         state.set_answer(answer)
+
+        # ── Generate citations from tool results (criterion 5) ──
+        citations: List[Dict[str, str]] = []
+        for key in ("vector_search", "graph_search"):
+            val = state.tool_results.get(key)
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict) and item.get("chunk_id"):
+                        citations.append({
+                            "chunk_id": item.get("chunk_id", ""),
+                            "document_id": item.get("source", item.get("document_id", "")),
+                            "text_snippet": (item.get("content", "") or "")[:200],
+                        })
+            elif isinstance(val, dict) and val.get("chunks"):
+                for chunk in val["chunks"]:
+                    if isinstance(chunk, dict) and chunk.get("chunk_id"):
+                        citations.append({
+                            "chunk_id": chunk.get("chunk_id", ""),
+                            "document_id": chunk.get("source", chunk.get("document_id", "")),
+                            "text_snippet": (chunk.get("content", "") or "")[:200],
+                        })
+        state.citations = citations[:10]  # Limit to top 10
+
         return state
 
     async def _verify(self, state: AgentRunState, context: RAGContext) -> AgentRunState:
@@ -637,3 +677,180 @@ def _record_error(context: RAGContext, stage_name: str, message: str) -> None:
             recorder.end(trace_id, TraceStage.ERROR, message)
     except Exception:
         pass  # Trace failure must never break the pipeline
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Tool-call summarisation helpers (criterion 3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _summarise_params(tool_name: str, kwargs: Dict[str, Any]) -> str:
+    """Produce a short summary of tool parameters for recording."""
+    if tool_name == "vector_search":
+        query = str(kwargs.get("query", ""))[:60]
+        top_k = kwargs.get("top_k", 5)
+        return f"query={query}, top_k={top_k}"
+    elif tool_name == "graph_search":
+        query = str(kwargs.get("query", ""))[:60]
+        top_k = kwargs.get("top_k", 5)
+        return f"query={query}, top_k={top_k}"
+    elif tool_name == "document_summary":
+        chunks = kwargs.get("chunks")
+        count = len(chunks) if isinstance(chunks, list) else 0
+        return f"chunks={count}"
+    elif tool_name == "answer_verify":
+        answer_len = len(str(kwargs.get("answer", "")))
+        chunks = kwargs.get("chunks")
+        count = len(chunks) if isinstance(chunks, list) else 0
+        return f"answer_len={answer_len}, context_chunks={count}"
+    else:
+        return ", ".join(f"{k}={str(v)[:40]}" for k, v in list(kwargs.items())[:3])
+
+
+def _summarise_tool_result(result: ToolResult) -> str:
+    """Produce a short summary of tool result for recording."""
+    if not result.success:
+        return f"FAILED: {result.error or 'unknown error'}"
+    data = result.data
+    if isinstance(data, list):
+        return f"{len(data)} items"
+    elif isinstance(data, dict):
+        if "chunks" in data:
+            return f"{len(data['chunks'])} chunks"
+        if "summary" in data:
+            return f"summary: {len(str(data['summary']))} chars"
+        if "passed" in data:
+            return f"passed={data['passed']}, issues={len(data.get('issues', []))}"
+        return f"keys: {list(data.keys())[:3]}"
+    elif isinstance(data, str):
+        return f"{len(data)} chars"
+    return "ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AgentMetrics — evaluation for tool accuracy & trajectory success (criterion 6)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class AgentMetrics:
+    """Evaluate agent performance across multiple runs.
+
+    Tracks two key metrics:
+      - **tool_selection_accuracy**: How often the router picks the expected tool(s).
+      - **trajectory_success_rate**: How often the full workflow reaches a
+        successful completion (status == "completed").
+
+    Usage::
+
+        metrics = AgentMetrics()
+        metrics.record(expected_tools=["vector_search"],
+                       actual_tools=["vector_search"],
+                       trajectory_success=True)
+        metrics.record(expected_tools=["graph_search"],
+                       actual_tools=["vector_search"],
+                       trajectory_success=False)
+        print(metrics.report())
+    """
+
+    def __init__(self) -> None:
+        self._total_runs: int = 0
+        self._tool_correct: int = 0
+        self._tool_total: int = 0  # Runs that had expected tools set
+        self._trajectory_successes: int = 0
+        self._runs: List[Dict[str, Any]] = []
+
+    def record(
+        self,
+        *,
+        query: str = "",
+        expected_tools: Optional[List[str]] = None,
+        actual_tools: Optional[List[str]] = None,
+        trajectory_success: bool = False,
+        steps_count: int = 0,
+        errors: Optional[List[str]] = None,
+    ) -> None:
+        """Record the outcome of a single agent run.
+
+        Args:
+            query:              The user query.
+            expected_tools:     The tool(s) the router *should* have selected.
+            actual_tools:       The tool(s) the router *actually* selected.
+            trajectory_success: Whether the full workflow completed successfully.
+            steps_count:        Number of steps taken.
+            errors:             Any non-fatal errors encountered.
+        """
+        self._total_runs += 1
+
+        if trajectory_success:
+            self._trajectory_successes += 1
+
+        if expected_tools is not None and actual_tools is not None:
+            self._tool_total += 1
+            # Exact match (order-independent)
+            if set(expected_tools) == set(actual_tools):
+                self._tool_correct += 1
+
+        self._runs.append({
+            "query": query,
+            "expected_tools": expected_tools or [],
+            "actual_tools": actual_tools or [],
+            "trajectory_success": trajectory_success,
+            "steps_count": steps_count,
+            "errors": errors or [],
+        })
+
+    @property
+    def tool_selection_accuracy(self) -> float:
+        """Fraction of runs where tool selection matched expectations."""
+        if self._tool_total == 0:
+            return 0.0
+        return self._tool_correct / self._tool_total
+
+    @property
+    def trajectory_success_rate(self) -> float:
+        """Fraction of runs that completed successfully."""
+        if self._total_runs == 0:
+            return 0.0
+        return self._trajectory_successes / self._total_runs
+
+    @property
+    def total_runs(self) -> int:
+        return self._total_runs
+
+    def report(self) -> Dict[str, Any]:
+        """Return a structured evaluation report."""
+        return {
+            "total_runs": self._total_runs,
+            "tool_selection_accuracy": round(self.tool_selection_accuracy, 4),
+            "tool_correct": self._tool_correct,
+            "tool_total": self._tool_total,
+            "trajectory_success_rate": round(self.trajectory_success_rate, 4),
+            "trajectory_successes": self._trajectory_successes,
+            "runs": self._runs,
+        }
+
+    def summary(self) -> str:
+        """Return a human-readable summary."""
+        r = self.report()
+        lines = [
+            "═══════════════════════════════════════",
+            "  Agent Evaluation Summary",
+            "═══════════════════════════════════════",
+            f"  Total runs:              {r['total_runs']}",
+            f"  Tool selection accuracy: {r['tool_selection_accuracy']:.1%} "
+            f"({r['tool_correct']}/{r['tool_total']})",
+            f"  Trajectory success rate: {r['trajectory_success_rate']:.1%} "
+            f"({r['trajectory_successes']}/{r['total_runs']})",
+        ]
+        return "\n".join(lines)
+
+    def reset(self) -> None:
+        """Clear all recorded data."""
+        self._total_runs = 0
+        self._tool_correct = 0
+        self._tool_total = 0
+        self._trajectory_successes = 0
+        self._runs.clear()
+
+    def __len__(self) -> int:
+        return self._total_runs
