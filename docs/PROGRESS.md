@@ -7,13 +7,13 @@
 | 项目 | 结果 |
 | --- | --- |
 | 分支 | `main`（已合并 `feature/b-complete-validated` + `feature/c-orchestration-agent`） |
-| 合并提交 | `d489213 Merge feature/c-orchestration-agent into main` |
+| 合并提交 | `141649a Merge branch 'feature/c-orchestration-agent'` |
 | C 层测试收集 | 413（RAG + Agent） |
 | C 层全量通过 | 413 |
 | B 层测试收集 | 131（离线可用子集） |
 | B 层全量通过 | 131 |
 | 全量收集 | 546 |
-| 全量通过 | 544（2 个 B 层 PDF/DOCX 测试因 `pypdf`/`python-docx` 可选依赖未安装而跳过） |
+| 全量通过 | 546（已安装 `requirements-dev.txt`，包含 `pytest` 与 `pytest-asyncio`） |
 
 ## 总体进度
 
@@ -139,13 +139,11 @@
 | C8 | `9f8fce4` | `fix: resolve 4 Agentic RAG integration issues` |
 | 合并 | `d489213` | `Merge feature/c-orchestration-agent into main` |
 
-## 已知交付瑕疵
+## 已知交付说明
 
-### 1. `pytest-asyncio` 未纳入 `requirements.txt`
+### 1. 测试依赖由 `requirements-dev.txt` 管理
 
-`requirements.txt` 包含 `langgraph` 等运行时依赖，但不包含测试必需的 `pytest-asyncio`。干净环境只装 `requirements.txt + pytest` 会导致大量 async 测试因缺少 `pytest_asyncio` marker 而失败。
-
-**解决**：`requirements-dev.txt` 已提供 `pytest>=8.0` + `pytest-asyncio>=0.24`。运行测试前安装：
+`requirements.txt` 包含 RAG 与 Agent 运行时依赖；开发测试依赖单独放在 `requirements-dev.txt`，其中包含 `pytest` 和 `pytest-asyncio`。运行完整测试前安装：
 
 ```bash
 pip install -r requirements-dev.txt
@@ -164,7 +162,7 @@ pip install -r requirements-dev.txt
 | --- | --- |
 | `python -m pytest tests/unit/rag/ tests/unit/agent/ -q` | **413 passed** (C 层) |
 | `python -m pytest tests/ -q` | **546 passed** (全量，已安装 `requirements-dev.txt` 的 `pytest-asyncio`) |
-| 干净环境测试 | 需 `pip install -r requirements-dev.txt` 否则 async 测试因缺 `pytest-asyncio` 失败 |
+| 干净环境测试 | 安装 `requirements-dev.txt` 后全量通过 |
 | `langgraph` 依赖 | 已在 `requirements.txt` 声明 `langgraph>=0.2.0`；源码延迟导入保护 |
 | GraphRAG 真实后端 | 等待 Owner D 提供 `GraphRetrieverProtocol` 实现和 `GraphRAGStrategy` |
 
@@ -172,7 +170,7 @@ pip install -r requirements-dev.txt
 
 ### 后续集成
 
-- `pypdf` / `python-docx` 可选依赖触发 2 个 B 层 PDF/DOCX 测试失败（非阻塞）。
+- `pypdf` / `python-docx` 已纳入基础依赖；PDF/DOCX 相关 B 层测试在干净开发环境中通过。
 - 如需要 Chroma/OpenAI/BGE 集成测试，安装对应 `requirements-*.txt`。
 
 ### 未实现功能

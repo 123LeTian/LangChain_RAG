@@ -25,7 +25,7 @@
 | --- | --- |
 | C 层测试 (`tests/unit/rag/` + `tests/unit/agent/`) | **413 passed** |
 | B 层测试 (离线可用子集) | **131 passed** |
-| 全量 | **544 passed** (2 skip — `pypdf`/`python-docx` 可选依赖) |
+| 全量 | **546 passed** (已安装 `requirements-dev.txt`) |
 
 ## 安装
 
