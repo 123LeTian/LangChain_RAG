@@ -12,9 +12,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
+from typing import Any, Dict, List, Optional, Sequence, TypedDict
 
-from langgraph.graph.message import add_messages
+# LangGraph is optional — only needed for the legacy AgentState TypedDict.
+# The CURRENT AgentRunState does NOT depend on it.
+try:
+    from langgraph.graph.message import add_messages
+    _LANGGRAPH_AVAILABLE = True
+except ImportError:
+    add_messages = None  # type: ignore[assignment]
+    _LANGGRAPH_AVAILABLE = False
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────
@@ -161,7 +168,8 @@ class AgentState(TypedDict, total=False):
     fallback_used: bool
     answer: Optional[str]
     citations: List[Dict[str, str]]
-    messages: Annotated[Sequence, add_messages]  # type: ignore[valid-type]
+    messages: Sequence  # type: ignore[valid-type]
+    # When langgraph is available this becomes Annotated[Sequence, add_messages]
 
 
 # ── Legacy helpers ──────────────────────────────────────────────────────────

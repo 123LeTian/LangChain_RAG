@@ -21,8 +21,6 @@ import logging
 import time
 from typing import Any, Dict, List, Literal, Optional
 
-from langgraph.graph import END, StateGraph
-
 from src.agent.state import (
     AgentAction,
     AgentRunState,
@@ -551,7 +549,10 @@ def should_continue(state: AgentState) -> Literal["plan", "retrieve", "reason", 
     return "generate"
 
 
-def build_agent_graph() -> StateGraph:
+def build_agent_graph() -> Any:
+    """Build the legacy LangGraph StateGraph. Requires langgraph to be installed."""
+    from langgraph.graph import StateGraph  # lazy import
+
     workflow = StateGraph(AgentState)
     for name, node in [("plan", plan_node), ("retrieve", retrieve_node), ("reason", reason_node),
                         ("tool_call", tool_call_node), ("generate", generate_node), ("reflect", reflect_node)]:
@@ -566,9 +567,14 @@ _compiled_graph = None
 
 
 def get_agent_graph() -> Any:
+    """Return the compiled legacy LangGraph or None if langgraph is unavailable."""
     global _compiled_graph
     if _compiled_graph is None:
-        _compiled_graph = build_agent_graph().compile()
+        try:
+            _compiled_graph = build_agent_graph().compile()
+        except ImportError:
+            logger.warning("langgraph not installed — legacy graph unavailable")
+            return None
     return _compiled_graph
 
 
