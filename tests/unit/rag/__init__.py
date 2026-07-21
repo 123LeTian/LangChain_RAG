@@ -1,1 +1,2 @@
-"""B4 strategy tests."""
+# Unit tests for src/rag/ — Owner: C
+"""RAG strategy tests."""
