@@ -27,8 +27,6 @@ from src.models.rag import (
     RAGMode,
     RAGRequest,
     RAGResult,
-    TraceEvent,
-    TraceStage,
 )
 from src.rag.base import (
     GeneratorProtocol,
@@ -243,23 +241,10 @@ class RAGService:
 
         Strategy reads dependencies from the context — never creates its own.
         """
-        recorded_events: List[TraceEvent] = []
+        from src.rag.trace import TraceRecorder
 
-        def trace_recorder(
-            stage: TraceStage,
-            input_summary: str,
-            output_summary: str,
-            duration_ms: float,
-        ) -> None:
-            recorded_events.append(
-                TraceEvent(
-                    trace_id=trace_id,
-                    stage=stage,
-                    input_summary=input_summary,
-                    output_summary=output_summary,
-                    duration_ms=duration_ms,
-                )
-            )
+        recorder = TraceRecorder()
+        recorder.start_trace(trace_id)
 
         return RAGContext(
             query=request.query,
@@ -268,7 +253,7 @@ class RAGService:
             llm=self._llm,
             retriever=self._retriever,
             tools=list(self._tools),
-            trace_recorder=trace_recorder,
+            trace_recorder=recorder,
             config=request.options,
             metadata={
                 "trace_id": trace_id,
