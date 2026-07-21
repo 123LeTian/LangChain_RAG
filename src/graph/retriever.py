@@ -37,6 +37,22 @@ STOPWORDS = {
     "overview",
 }
 
+GLOBAL_SCOPE_HINTS = {
+    "整体",
+    "总体",
+    "主题",
+    "趋势",
+    "概括",
+    "总结",
+    "summarize",
+    "summary",
+    "overall",
+    "global",
+    "theme",
+    "trend",
+    "overview",
+}
+
 
 class GraphSearchHit(BaseModel):
     """Local graph search hit centered on one matched entity."""
@@ -276,6 +292,20 @@ class GraphRetriever:
         return None
 
 
+def resolve_graph_scope(query: str, scope: str = "auto") -> str:
+    """Resolve local/global/auto graph search scope deterministically."""
+
+    normalized_scope = str(scope or "auto").strip().lower()
+    if normalized_scope not in {"local", "global", "auto"}:
+        raise ValueError("scope must be one of: local, global, auto")
+    if normalized_scope != "auto":
+        return normalized_scope
+    query_lower = str(query or "").lower()
+    if any(hint in query_lower for hint in GLOBAL_SCOPE_HINTS):
+        return "global"
+    return "local"
+
+
 def _validate_query(query: str, kb_id: str, top_k: int) -> List[str]:
     warnings = []
     if not isinstance(query, str) or not query.strip():
@@ -481,4 +511,5 @@ __all__ = [
     "GraphLocalSearchResult",
     "GraphRetriever",
     "GraphSearchHit",
+    "resolve_graph_scope",
 ]

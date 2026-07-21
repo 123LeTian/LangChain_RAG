@@ -20,8 +20,14 @@ from src.graph.retriever import (
     GraphLocalSearchResult,
     GraphRetriever,
     GraphSearchHit,
+    resolve_graph_scope,
 )
 from src.graph.reports import CommunityReportBuilder
+from src.graph.tool import (
+    GraphSearchTool,
+    graph_search,
+    register_graph_search_tool,
+)
 
 
 __all__ = [
@@ -37,8 +43,12 @@ __all__ = [
     "GraphLocalSearchResult",
     "GraphRetriever",
     "GraphSearchHit",
+    "GraphSearchTool",
     "InMemoryGraphRepository",
     "MockGraphExtractor",
     "NetworkXGraphIndex",
     "RuleBasedGraphExtractor",
+    "graph_search",
+    "register_graph_search_tool",
+    "resolve_graph_scope",
 ]
