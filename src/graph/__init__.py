@@ -14,6 +14,13 @@ from src.graph.repository import (
     GraphRepositoryError,
     InMemoryGraphRepository,
 )
+from src.graph.retriever import (
+    GraphGlobalSearchHit,
+    GraphGlobalSearchResult,
+    GraphLocalSearchResult,
+    GraphRetriever,
+    GraphSearchHit,
+)
 from src.graph.reports import CommunityReportBuilder
 
 
@@ -25,6 +32,11 @@ __all__ = [
     "GraphIndexBuilder",
     "GraphRepository",
     "GraphRepositoryError",
+    "GraphGlobalSearchHit",
+    "GraphGlobalSearchResult",
+    "GraphLocalSearchResult",
+    "GraphRetriever",
+    "GraphSearchHit",
     "InMemoryGraphRepository",
     "MockGraphExtractor",
     "NetworkXGraphIndex",
