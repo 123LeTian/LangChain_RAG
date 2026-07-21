@@ -1,10 +1,5 @@
 <template>
-  <!--
-    对话页面 — Chat + Trace
-    五模式选择器、SSE 流式输出、引用抽屉、Trace 时间线
-  -->
   <div class="chat-page">
-    <!-- 侧边栏：模式选择 + 知识库选择 -->
     <aside class="chat-sidebar">
       <h3>RAG 模式</h3>
       <div class="mode-list">
@@ -19,9 +14,7 @@
 
       <h3>知识库</h3>
       <select v-model="selectedKbId" class="kb-select">
-        <option value="kb_001">产品技术手册</option>
-        <option value="kb_002">公司内部制度</option>
-        <option value="kb_003">行业白皮书合集</option>
+        <option v-for="kb in kbList" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
       </select>
 
       <h3>高级选项</h3>
@@ -39,7 +32,6 @@
       </label>
     </aside>
 
-    <!-- 主体：消息区和输入框 -->
     <main class="chat-main">
       <div class="chat-messages" ref="msgContainer">
         <div v-if="messages.length === 0" class="welcome">
@@ -51,7 +43,6 @@
           <div class="msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
           <div class="msg-content" v-html="msg.content"></div>
 
-          <!-- 引用抽屉（仅 AI 消息显示） -->
           <div v-if="msg.citations?.length" class="citations">
             <details>
               <summary>📎 {{ msg.citations.length }} 条引用来源</summary>
@@ -64,7 +55,6 @@
             </details>
           </div>
 
-          <!-- Trace 时间线缩略 -->
           <div v-if="msg.trace?.length" class="trace-mini">
             <details>
               <summary>🔍 执行轨迹 ({{ msg.trace.length }} 阶段)</summary>
@@ -80,12 +70,11 @@
         </div>
 
         <div v-if="streaming" class="message assistant streaming">
-          <div class="msg-role">AI ⏳</div>
+          <div class="msg-role">AI ⋯</div>
           <div class="msg-content">{{ streamingText || '思考中...' }}</div>
         </div>
       </div>
 
-      <!-- 输入区域 -->
       <div class="chat-input-bar">
         <textarea
           v-model="query"
@@ -104,10 +93,9 @@
 </template>
 
 <script setup>
-import { ref, nextTick } from 'vue'
-import { ragQueryStream } from '../api/client'
+import { ref, nextTick, onMounted } from 'vue'
+import { ragQueryStream, listKnowledgeBases } from '../api/client'
 
-// ===== 模式列表 =====
 const modes = [
   { value: 'naive', label: 'Naive' },
   { value: 'advanced', label: 'Advanced' },
@@ -116,31 +104,39 @@ const modes = [
   { value: 'agentic', label: 'Agentic' },
 ]
 
-// ===== 响应式状态 =====
 const selectedMode = ref('naive')
-const selectedKbId = ref('kb_001')
+const selectedKbId = ref('')
 const query = ref('')
 const messages = ref([])
 const streaming = ref(false)
 const streamingText = ref('')
 const msgContainer = ref(null)
+const kbList = ref([])
 
-// 高级选项
 const options = ref({
   top_k: 5,
   rewrite_enabled: false,
   rerank_enabled: false,
 })
 
-// AbortController 用于取消 SSE
 let abortCtrl = null
 
-// ===== 发送查询 =====
+// Load knowledge bases from API
+onMounted(async () => {
+  try {
+    kbList.value = await listKnowledgeBases()
+    if (kbList.value.length > 0) {
+      selectedKbId.value = kbList.value[0].id
+    }
+  } catch (e) {
+    console.error('Failed to load KBs:', e)
+  }
+})
+
 async function sendQuery() {
   const q = query.value.trim()
   if (!q || streaming.value) return
 
-  // 添加用户消息
   messages.value.push({ role: 'user', content: q })
   query.value = ''
   streaming.value = true
@@ -158,20 +154,16 @@ async function sendQuery() {
       mode: selectedMode.value,
       options: options.value,
     },
-    // onTrace
     (event) => { currentMsg.trace.push(event) },
-    // onChunk
     (delta) => {
       streamingText.value += delta
       currentMsg.content += delta
     },
-    // onDone
     (data) => {
       currentMsg.citations = data.citations
       streaming.value = false
       streamingText.value = ''
     },
-    // onError
     (err) => {
       currentMsg.content = `❌ 错误：${err.message}`
       streaming.value = false
@@ -183,13 +175,11 @@ async function sendQuery() {
   scrollToBottom()
 }
 
-// ===== 取消查询 =====
 function cancelQuery() {
   abortCtrl?.abort()
   streaming.value = false
 }
 
-// ===== 滚动到底部 =====
 function scrollToBottom() {
   if (msgContainer.value) {
     msgContainer.value.scrollTop = msgContainer.value.scrollHeight

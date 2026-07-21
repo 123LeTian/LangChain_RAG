@@ -13,7 +13,7 @@ from fastapi import Depends
 
 
 # ============================================================================
-# 服务依赖（占位实现 — 后续由 B/C/D 同学提供真实服务后替换）
+# 知识库服务（桩）
 # ============================================================================
 
 class KnowledgeService:
@@ -28,14 +28,27 @@ class KnowledgeService:
         return {}
 
 
+# ============================================================================
+# RAG 服务 — 已接入真实 DeepSeek + 向量检索
+# ============================================================================
+
 class RAGService:
-    """RAG 服务桩 — C 同学实现"""
+    """RAG 服务 — 委托给 RealRAGService (DeepSeek + HuggingFace 向量检索)"""
+    def __init__(self):
+        from src.api.real_rag_service import RealRAGService
+        self._real = RealRAGService()
+
     async def query(self, request: Any) -> Any:
-        return None
+        return await self._real.query(request)
 
     async def query_stream(self, request: Any):
-        yield ""
+        async for chunk in self._real.query_stream(request):
+            yield chunk
 
+
+# ============================================================================
+# 其他服务（桩）
+# ============================================================================
 
 class GraphRepository:
     """图谱仓库桩 — D 同学实现"""
@@ -62,7 +75,6 @@ class EvaluationRunner:
 # 服务单例与依赖注入函数
 # ============================================================================
 
-# 全局单例（后续换真实实现时替换即可）
 _knowledge_service = KnowledgeService()
 _rag_service = RAGService()
 _graph_repo = GraphRepository()
@@ -71,32 +83,27 @@ _eval_runner = EvaluationRunner()
 
 
 async def get_knowledge_service() -> KnowledgeService:
-    """注入 KnowledgeService"""
     return _knowledge_service
 
 
 async def get_rag_service() -> RAGService:
-    """注入 RAGService"""
     return _rag_service
 
 
 async def get_graph_repo() -> GraphRepository:
-    """注入 GraphRepository"""
     return _graph_repo
 
 
 async def get_trace_repo() -> TraceRepository:
-    """注入 TraceRepository"""
     return _trace_repo
 
 
 async def get_eval_runner() -> EvaluationRunner:
-    """注入 EvaluationRunner"""
     return _eval_runner
 
 
 # ============================================================================
-# 类型别名 — 简化路由函数签名
+# 类型别名
 # ============================================================================
 
 KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]

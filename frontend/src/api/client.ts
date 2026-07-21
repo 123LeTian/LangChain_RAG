@@ -1,4 +1,4 @@
-/**
+﻿/**
  * API 客户端 — 封装所有后端 REST 与 SSE 端点
  * 使用传入的 baseURL 以支持开发/生产环境切换
  */
@@ -16,7 +16,7 @@ import type {
 } from '../types'
 
 // ========== 默认基地址 ==========
-const BASE = 'http://localhost:8000'
+const BASE = ''
 
 // ========== 通用请求工具 ==========
 
