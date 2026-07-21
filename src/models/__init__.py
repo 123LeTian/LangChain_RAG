@@ -9,6 +9,15 @@ from .knowledge import (
     KnowledgeBase,
     KnowledgeBaseStatus,
 )
+from .graph import (
+    CommunityReport,
+    GraphBuildResult,
+    GraphCommunity,
+    GraphEntity,
+    GraphExtractionResult,
+    GraphRelationship,
+    GraphSourceRef,
+)
 from .schemas import Citation, RetrievalHit
 
 from src.models.rag import (
@@ -39,6 +48,14 @@ __all__ = [
     "DocumentStatus",
     "KnowledgeBase",
     "KnowledgeBaseStatus",
+    # Graph
+    "CommunityReport",
+    "GraphBuildResult",
+    "GraphCommunity",
+    "GraphEntity",
+    "GraphExtractionResult",
+    "GraphRelationship",
+    "GraphSourceRef",
     # Schemas
     "Citation",
     "RetrievalHit",

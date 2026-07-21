@@ -18,8 +18,7 @@ try:
 except ImportError:
     AgenticRAGStrategy = None  # type: ignore[assignment]
 
-# D-owned strategy class (import when implemented):
-# from src.rag.strategies.graph_rag import GraphRAGStrategy
+from src.rag.strategies.graph_rag import GraphRAGStrategy
 
 __all__ = [
     # B-owned
@@ -29,6 +28,8 @@ __all__ = [
     "ModularRAGStrategy",
     "ModuleConfig",
     "validate_module_config",
+    # GraphRAG (Owner: D)
+    "GraphRAGStrategy",
     # Agentic (Owner: C)
     "AgenticRAGStrategy",
 ]

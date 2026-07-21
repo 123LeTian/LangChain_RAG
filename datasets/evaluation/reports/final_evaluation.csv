@@ -1,0 +1,6 @@
+mode,runner_type,status,hit_at_1,hit_at_3,hit_at_5,mrr,average_latency_ms,p95_latency_ms,average_token_count,citation_presence_rate,answer_point_coverage,failure_count
+naive,mock_naive,ok,1.0,1.0,1.0,1.0,0.06675,0.081,245.5,1.0,1.0,0
+advanced,mock_advanced,ok,1.0,1.0,1.0,1.0,0.063667,0.091,245.5,1.0,1.0,0
+modular,mock_modular,ok,1.0,1.0,1.0,1.0,0.059708,0.066,245.5,1.0,1.0,0
+graph,mock_graph,ok,1.0,1.0,1.0,1.0,0.06575,0.082,245.5,1.0,1.0,0
+agentic,mock_agentic,ok,1.0,1.0,1.0,1.0,0.066,0.077,245.5,1.0,1.0,0
