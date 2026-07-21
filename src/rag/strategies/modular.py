@@ -383,9 +383,24 @@ class ModularRAGStrategy(RAGStrategy):
             Query → Rewrite → Retrieve → Rerank → Compress → Generate → Verify
 
         Each enabled module records its start/end via ``context.trace_recorder``.
+
+        The active pipeline config is saved into ``context.metadata["pipeline_config"]``
+        so it can be inspected after the run (acceptance criterion 3).
         """
         config = self._config
         warnings: List[str] = []
+
+        # ── Save active config for post-run inspection ─────────────
+        context.metadata["pipeline_config"] = {
+            "rewrite": config.rewrite,
+            "retrieve": config.retrieve,
+            "rerank": config.rerank,
+            "compress": config.compress,
+            "verify": config.verify,
+            "top_k": config.top_k,
+            "rerank_top_k": config.rerank_top_k,
+            "compress_max_tokens": config.compress_max_tokens,
+        }
 
         # ── Validate config ──────────────────────────────────────────
         errors = validate_module_config(config)
@@ -482,6 +497,126 @@ class ModularRAGStrategy(RAGStrategy):
             trace=recorder.get_trace(trace_id),
             warnings=warnings,
         )
+
+    # ── Compare (acceptance criterion 4) ───────────────────────────────
+
+    async def compare(
+        self,
+        request: RAGRequest,
+        context: RAGContext,
+        config_a: ModuleConfig,
+        config_b: ModuleConfig,
+        *,
+        labels: tuple = ("A", "B"),
+    ) -> Dict[str, Any]:
+        """Run the same query with two pipeline configs and return side-by-side results.
+
+        Implements "相同问题可一键对比两套配置" — run the same query through
+        two different pipeline configurations and compare the outputs.
+
+        Args:
+            request:   The shared query request.
+            context:   The shared RAG context (dependencies are reused).
+            config_a:  First pipeline configuration.
+            config_b:  Second pipeline configuration.
+            labels:    Display labels for the two configs (default ``("A", "B")``).
+
+        Returns:
+            Dict with ``result_a``, ``result_b`` (the two :class:`RAGResult`),
+            ``trace_a``, ``trace_b``, and a ``summary`` string for display.
+        """
+        # Snapshot original context state so we can restore it
+        _original_chunks = list(context.chunks)
+        _original_metadata = dict(context.metadata)
+        _original_config = self._config
+
+        try:
+            # ── Run with config A ──────────────────────────────────────
+            self.set_config(config_a)
+            context.chunks = []
+            context.metadata = {**_original_metadata}
+            result_a = await self.run(request, context)
+            trace_a = list(result_a.trace)
+
+            # ── Run with config B ──────────────────────────────────────
+            self.set_config(config_b)
+            context.chunks = []
+            context.metadata = {**_original_metadata}
+            result_b = await self.run(request, context)
+            trace_b = list(result_b.trace)
+
+            # ── Build summary ──────────────────────────────────────────
+            summary = self._build_comparison_summary(
+                config_a, config_b, result_a, result_b, labels
+            )
+
+            return {
+                "result_a": result_a,
+                "result_b": result_b,
+                "trace_a": trace_a,
+                "trace_b": trace_b,
+                "summary": summary,
+            }
+        finally:
+            # Restore original state
+            self._config = _original_config
+            context.chunks = _original_chunks
+            context.metadata = _original_metadata
+
+    async def compare_presets(
+        self,
+        request: RAGRequest,
+        context: RAGContext,
+        preset_a: str,
+        preset_b: str,
+    ) -> Dict[str, Any]:
+        """Like :meth:`compare`, but takes two preset names.
+
+        Raises:
+            KeyError: If either preset is not found.
+        """
+        cfg_a = self.load_preset(preset_a)
+        cfg_b = self.load_preset(preset_b)
+        return await self.compare(
+            request, context, cfg_a, cfg_b, labels=(preset_a, preset_b)
+        )
+
+    @staticmethod
+    def _build_comparison_summary(
+        config_a: ModuleConfig,
+        config_b: ModuleConfig,
+        result_a: RAGResult,
+        result_b: RAGResult,
+        labels: tuple,
+    ) -> str:
+        """Build a human-readable side-by-side comparison table."""
+        def _cfg_str(cfg: ModuleConfig) -> str:
+            parts = [name for name in ("rewrite", "retrieve", "rerank", "compress", "verify")
+                     if getattr(cfg, name)]
+            return "+".join(parts) if parts else "generate-only"
+
+        lines = [
+            "═════════════════════════════════════════════",
+            f"  Pipeline Comparison: '{labels[0]}' vs '{labels[1]}'",
+            "═════════════════════════════════════════════",
+            "",
+            f"  {'':>12} | {labels[0]:<20} | {labels[1]:<20}",
+            f"  {'Pipeline':>12} | {_cfg_str(config_a):<20} | {_cfg_str(config_b):<20}",
+            f"  {'top_k':>12} | {config_a.top_k:<20} | {config_b.top_k:<20}",
+            f"  {'answer_len':>12} | {len(result_a.answer):<20} | {len(result_b.answer):<20}",
+            f"  {'hits':>12} | {len(result_a.hits):<20} | {len(result_b.hits):<20}",
+            f"  {'warnings':>12} | {len(result_a.warnings):<20} | {len(result_b.warnings):<20}",
+        ]
+
+        if result_a.trace and result_b.trace:
+            trace_a_stages = "+".join(e.stage.value for e in result_a.trace)
+            trace_b_stages = "+".join(e.stage.value for e in result_b.trace)
+            lines.extend([
+                f"  {'trace':>12} | {trace_a_stages:<20} | {trace_b_stages:<20}",
+            ])
+
+        lines.append("")
+        return "\n".join(lines)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
