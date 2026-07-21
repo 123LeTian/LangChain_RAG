@@ -1,0 +1,119 @@
+{
+  "name": "Agentic RAG Acceptance Test Questions",
+  "description": "10+ test questions covering three query types (fact, entity/relationship, summary) for evaluating Agentic RAG tool selection accuracy and trajectory success rate.",
+  "version": "1.0",
+  "created": "2026-07-21",
+  "questions": [
+    {
+      "id": "Q001",
+      "query": "What is retrieval augmented generation?",
+      "type": "fact",
+      "expected_tools": ["vector_search"],
+      "description": "Basic factual definition query"
+    },
+    {
+      "id": "Q002",
+      "query": "Who is Alan Turing and what are his contributions to computer science?",
+      "type": "fact",
+      "expected_tools": ["vector_search"],
+      "description": "Factual query about a historical figure"
+    },
+    {
+      "id": "Q003",
+      "query": "Define attention mechanism in transformer models",
+      "type": "fact",
+      "expected_tools": ["vector_search"],
+      "description": "Technical definition query"
+    },
+    {
+      "id": "Q004",
+      "query": "List the key components of a RAG pipeline",
+      "type": "fact",
+      "expected_tools": ["vector_search"],
+      "description": "List-type factual query"
+    },
+    {
+      "id": "Q005",
+      "query": "What is the relationship between neural networks and deep learning?",
+      "type": "entity",
+      "expected_tools": ["graph_search"],
+      "description": "Entity relationship query"
+    },
+    {
+      "id": "Q006",
+      "query": "Explain the hierarchy of biological taxonomy from domain to species",
+      "type": "entity",
+      "expected_tools": ["graph_search"],
+      "description": "Hierarchy/structure query"
+    },
+    {
+      "id": "Q007",
+      "query": "How are transformers and attention mechanisms connected in the architecture?",
+      "type": "entity",
+      "expected_tools": ["graph_search"],
+      "description": "Entity connection/network query"
+    },
+    {
+      "id": "Q008",
+      "query": "Summarize the key findings of the BERT paper",
+      "type": "summary",
+      "expected_tools": ["document_summary"],
+      "description": "Document summary query"
+    },
+    {
+      "id": "Q009",
+      "query": "Give me an overview of the LangChain framework",
+      "type": "summary",
+      "expected_tools": ["document_summary"],
+      "description": "Overview/summary query"
+    },
+    {
+      "id": "Q010",
+      "query": "Compare and contrast vector search versus knowledge graph retrieval for RAG",
+      "type": "complex",
+      "expected_tools": ["vector_search", "graph_search"],
+      "description": "Complex comparative analysis query"
+    },
+    {
+      "id": "Q011",
+      "query": "Analyze the pros and cons of using LangGraph for agent orchestration",
+      "type": "complex",
+      "expected_tools": ["vector_search", "graph_search"],
+      "description": "Analysis/evaluation query"
+    },
+    {
+      "id": "Q012",
+      "query": "Explain how embeddings are used in a vector database for semantic search",
+      "type": "fact",
+      "expected_tools": ["vector_search"],
+      "description": "Technical explanation factual query"
+    },
+    {
+      "id": "Q013",
+      "query": "What is the difference between sparse and dense retrieval methods?",
+      "type": "complex",
+      "expected_tools": ["vector_search", "graph_search"],
+      "description": "Comparison query triggering multi-tool selection"
+    },
+    {
+      "id": "Q014",
+      "query": "Summarize the advantages of agentic RAG over traditional RAG pipelines",
+      "type": "summary",
+      "expected_tools": ["document_summary"],
+      "description": "Summary query with technical content"
+    },
+    {
+      "id": "Q015",
+      "query": "What is the connection between prompt engineering and retrieval quality?",
+      "type": "entity",
+      "expected_tools": ["graph_search"],
+      "description": "Relationship query between concepts"
+    }
+  ],
+  "evaluation_config": {
+    "max_steps": 4,
+    "metrics": ["tool_selection_accuracy", "trajectory_success_rate"],
+    "tool_selection_accuracy_target": 0.80,
+    "trajectory_success_rate_target": 0.70
+  }
+}

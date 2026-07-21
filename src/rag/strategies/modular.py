@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from src.models.rag import (
     RAGChunk,
+    RAGCitation,
     RAGContext,
     RAGMode,
     RAGRequest,
@@ -491,8 +492,12 @@ class ModularRAGStrategy(RAGStrategy):
             ),
         )
 
+        # ── Build citations from retrieved chunks ───────────────────────
+        citations = _build_citations(context.chunks)
+
         return RAGResult(
             answer=answer,
+            citations=citations,
             hits=context.chunks,
             trace=recorder.get_trace(trace_id),
             warnings=warnings,
@@ -647,6 +652,19 @@ def _summarise_module_output(module_name: str, ctx: RAGContext) -> str:
     elif module_name == "compress":
         return f"{len(ctx.chunks)} chunks, {sum(len(c.content) for c in ctx.chunks)} chars"
     return f"done"
+
+
+def _build_citations(chunks: List[RAGChunk]) -> List[RAGCitation]:
+    """Build RAGCitation list from retrieved chunks."""
+    citations: List[RAGCitation] = []
+    for chunk in chunks:
+        if chunk.chunk_id and chunk.source.document_id:
+            citations.append(RAGCitation(
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.source.document_id,
+                text_snippet=chunk.content[:200] if chunk.content else "",
+            ))
+    return citations
 
 
 # ── Auto-register ─────────────────────────────────────────────────────────

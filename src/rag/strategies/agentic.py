@@ -2,52 +2,49 @@
 Agentic RAG Strategy — Owner: C
 Agent-driven RAG with tool use, multi-step reasoning, and dynamic retrieval decisions.
 
-This strategy wraps the LangGraph agent workflow and presents it through the
-standard RAGStrategyBase interface. The agent can:
-  - Plan multi-step retrieval strategies
-  - Call tools (vector search, graph search, calculator)
-  - Reason about retrieved information
-  - Reflect on answer quality and loop back if needed
-  - Gracefully degrade on errors
+This strategy implements the RAGStrategy (NEW) interface and delegates to the
+finite-state AgentWorkflow.  Dependencies (retriever, LLM, tools) are read
+from RAGContext — never created by the strategy.
 
-Dependencies:
-  - src/agent/workflow.py: the LangGraph state machine
-  - src/agent/state.py: AgentState definition
-  - src/agent/tools.py: ToolRegistry and ToolExecutor
-  - src/agent/router.py: QueryRouter for auto-routing (optional)
+Workflow:
+  START -> Intent Detection -> Tool Selection -> Tool Execution -> Generate -> Verify -> END
+
+Error degradation:
+  - graph_search fails -> auto-fallback to vector_search
+  - All tools fail -> structured error, LLM-only generation
+  - Stack traces are NEVER sent to LLM
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from src.agent.router import QueryRouter
-from src.agent.state import AgentState, AgentStatus, initial_state, state_snapshot
+from src.agent.state import AgentRunState
 from src.agent.tools import (
-    CalculatorTool,
-    DirectAnswerTool,
+    AnswerVerifyTool,
+    DocumentSummaryTool,
     GraphSearchTool,
-    ToolExecutor,
     ToolRegistry,
     VectorSearchTool,
+    create_default_tools,
 )
-from src.agent.workflow import get_agent_graph
+from src.agent.workflow import AgentWorkflow
 from src.models.rag import (
     RAGCitation,
-    RAGContext,
     RAGChunk,
+    RAGContext,
     RAGMode,
-    RAGQuery,
-    RAGResponse,
+    RAGRequest,
+    RAGResult,
     RAGSource,
-    StrategyType,
+    TraceStage,
 )
 from src.rag.base import (
     GeneratorProtocol,
     GraphRetrieverProtocol,
-    RAGStrategyBase,
+    RAGStrategy,
     RetrieverProtocol,
 )
 from src.rag.registry import get_registry
@@ -55,318 +52,218 @@ from src.rag.registry import get_registry
 logger = logging.getLogger(__name__)
 
 
-class AgenticRAGStrategy(RAGStrategyBase):
-    """Agent-driven RAG using LangGraph for multi-step reasoning.
+class AgenticRAGStrategy(RAGStrategy):
+    """Agent-driven RAG using the finite-state AgentWorkflow.
 
-    The agent:
-      1. Plans: Decomposes the query into steps.
-      2. Retrieves: Uses vector + graph search tools.
-      3. Reasons: Analyzes retrieved information.
-      4. Generates: Produces a grounded answer.
-      5. Reflects: Checks quality; may loop back for more retrieval.
+    Implements the NEW RAGStrategy interface — ``run(request, context) -> RAGResult``.
+    Dependencies (retriever, LLM, tools, graph) are injected via *context*, not
+    constructor arguments.
 
-    This strategy auto-registers with the StrategyRegistry.
+    The strategy:
+      1. Builds tools from context (retriever -> VectorSearchTool, etc.)
+      2. Creates an AgentRunState from the RAGRequest
+      3. Runs the finite-state AgentWorkflow
+      4. Converts the final AgentRunState into a RAGResult with citations
+
+    Usage via RAGService::
+
+        service = RAGService(retriever=..., llm=..., graph=...)
+        result = await service.run(RAGRequest(query="What is RAG?", mode=RAGMode.AGENTIC))
     """
 
-    strategy_type: StrategyType = StrategyType.AGENTIC
+    mode: RAGMode = RAGMode.AGENTIC
 
-    def __init__(
-        self,
-        retrieval: Optional[RetrieverProtocol] = None,
-        llm: Optional[GeneratorProtocol] = None,
-        graph: Optional[GraphRetrieverProtocol] = None,
-        *,
-        max_iterations: int = 10,
-        tool_timeout: float = 30.0,
-        use_router: bool = True,
-        config: Optional[Any] = None,
-    ) -> None:
-        super().__init__(config=config)
-        self._retrieval = retrieval
-        self._llm = llm
-        self._graph = graph
-        self._max_iterations = max_iterations
-        self._tool_timeout = tool_timeout
-        self._router = QueryRouter() if use_router else None
+    def __init__(self, max_steps: int = 4) -> None:
+        self._max_steps = max_steps
 
-        # Lazily built
-        self._tool_registry: Optional[ToolRegistry] = None
-        self._tool_executor: Optional[ToolExecutor] = None
+    # ── RAGStrategy.run — THE entry point ───────────────────────────────
 
-    # ── Dependency injection ───────────────────────────────────────────
+    async def run(self, request: RAGRequest, context: RAGContext) -> RAGResult:
+        """Execute the agentic RAG pipeline.
 
-    def set_retriever(self, retrieval: RetrieverProtocol) -> None:
-        self._retrieval = retrieval
-        self._tool_registry = None  # Rebuild tools on next use
-
-    def set_generator(self, llm: GeneratorProtocol) -> None:
-        self._llm = llm
-
-    def set_graph_retriever(self, graph: GraphRetrieverProtocol) -> None:
-        self._graph = graph
-        self._tool_registry = None  # Rebuild tools on next use
-
-    # ── Tool setup ─────────────────────────────────────────────────────
-
-    def _get_tool_executor(self) -> ToolExecutor:
-        """Return the tool executor, building it lazily."""
-        if self._tool_executor is None:
-            registry = ToolRegistry()
-
-            if self._retrieval:
-                registry.register(VectorSearchTool(self._retrieval))
-            if self._graph:
-                registry.register(GraphSearchTool(self._graph))
-            registry.register(CalculatorTool())
-            registry.register(DirectAnswerTool())
-
-            self._tool_registry = registry
-            self._tool_executor = ToolExecutor(
-                registry,
-                default_timeout=self._tool_timeout,
-                max_retries=1,
-            )
-        return self._tool_executor
-
-    # ── State preparation ──────────────────────────────────────────────
-
-    def _prepare_state(self, query: RAGQuery) -> AgentState:
-        """Build the initial AgentState with all dependencies bound in.
-
-        The LangGraph nodes read dependencies (retrieval, llm, graph, tools)
-        from the state dict, so we inject them here.
-        """
-        state = initial_state(
-            query=query.text,
-            max_iterations=self._max_iterations,
-        )
-
-        # Inject dependencies into state for nodes to use
-        state["retrieval"] = self._retrieval  # type: ignore[typeddict-unknown-key]
-        state["llm"] = self._llm  # type: ignore[typeddict-unknown-key]
-        state["graph"] = self._graph  # type: ignore[typeddict-unknown-key]
-        state["tool_executor"] = self._get_tool_executor()  # type: ignore[typeddict-unknown-key]
-
-        # If router is available, pre-compute routing
-        if self._router:
-            decision = self._router.route(query.text)
-            state["plan"] = [  # type: ignore[typeddict-unknown-key]
-                f"[Router: {decision.strategy.value}, confidence={decision.confidence:.0%}] "
-                f"{decision.reasoning}"
-            ]
-
-        return state
-
-    # ── RAGStrategyBase implementation ─────────────────────────────────
-
-    async def retrieve(self, query: RAGQuery) -> RAGContext:
-        """Run only the retrieval phase using agent tools."""
-        t0 = time.perf_counter()
-        all_chunks: List[RAGChunk] = []
-
-        if self._retrieval:
-            try:
-                context = self._retrieval.retrieve(query=query.text, top_k=query.top_k)
-                all_chunks.extend(context.chunks)
-            except Exception as exc:
-                logger.error("Agentic retrieve (vector) failed: %s", exc)
-
-        if self._graph:
-            try:
-                graph_context = self._graph.graph_search(
-                    query=query.text, top_k=query.top_k
-                )
-                all_chunks.extend(graph_context.chunks)
-            except Exception as exc:
-                logger.error("Agentic retrieve (graph) failed: %s", exc)
-
-        return RAGContext(
-            query=query.text,
-            chunks=all_chunks,
-            retrieval_method="agent",
-            retrieval_latency_ms=(time.perf_counter() - t0) * 1000,
-            total_candidates=len(all_chunks),
-        )
-
-    async def generate(self, context: RAGContext, query: RAGQuery) -> RAGResponse:
-        """Generate an answer from the given context."""
-        if not self._llm:
-            return RAGResponse(
-                query_id=query.query_id,
-                answer="[No LLM available for generation]",
-                strategy=StrategyType.AGENTIC,
-                context=context,
-            )
-
-        t0 = time.perf_counter()
-        try:
-            answer = await self._llm.generate(
-                prompt="Answer the question based on the provided context. Be thorough and cite sources.",
-                context=context.combined_text,
-            )
-        except Exception as exc:
-            answer = f"Error during generation: {exc}"
-
-        return RAGResponse(
-            query_id=query.query_id,
-            answer=answer,
-            strategy=StrategyType.AGENTIC,
-            context=context,
-            latency_ms=(time.perf_counter() - t0) * 1000,
-        )
-
-    async def run(self, query: RAGQuery) -> RAGResponse:
-        """Execute the full agentic RAG workflow.
-
-        This is the main entry point. It:
-          1. Builds initial state with bound dependencies
-          2. Runs the LangGraph agent workflow
-          3. Extracts the answer, citations, and metadata from final state
-          4. Falls back to direct retrieve→generate if the graph is unavailable
+        Args:
+            request: The user query + mode + options from the API layer.
+            context:  Injected dependencies (retriever, LLM, tools, trace_recorder).
 
         Returns:
-            RAGResponse with answer, citations, trace metadata, etc.
+            RAGResult with answer, citations, hits, trace, and warnings.
         """
         t0 = time.perf_counter()
+        warnings: List[str] = []
 
-        # ── Try LangGraph workflow ────────────────────────────────────
+        # ── Build tools from context dependencies ───────────────────────
+        tool_registry = self._build_tools(context)
+
+        # ── Create workflow and state ───────────────────────────────────
+        workflow = AgentWorkflow(max_steps=self._max_steps)
+        state = AgentRunState(query=request.query)
+
+        # Inject tools into context for the workflow
+        context.tools = list(tool_registry._tools.values()) if hasattr(tool_registry, '_tools') else []
+
+        # ── Record trace start ──────────────────────────────────────────
+        trace_id = context.metadata.get("trace_id", f"trace_agentic_{id(request)}")
+
+        # ── Execute the finite-state workflow ───────────────────────────
         try:
-            state = self._prepare_state(query)
-            graph = get_agent_graph()
-            final_state = await graph.ainvoke(state)
-            return self._build_response(query, final_state, t0)
-        except ImportError:
-            logger.warning("LangGraph not available — falling back to simple retrieve→generate")
+            state = await workflow.run(state, context)
         except Exception as exc:
-            logger.error("Agent workflow failed: %s. Falling back.", exc)
+            logger.exception("AgentWorkflow crashed")
+            return RAGResult(
+                answer="",
+                warnings=[f"AgentWorkflow error: {exc}"],
+            )
 
-        # ── Fallback: simple retrieve → generate ──────────────────────
-        return await self._fallback_run(query, t0)
+        # ── Build result from state ─────────────────────────────────────
+        return self._build_result(state, context, trace_id, t0, warnings)
 
-    async def stream(self, query: RAGQuery) -> AsyncIterator[Any]:
-        """Stream the agent workflow execution.
+    # ── Helpers ─────────────────────────────────────────────────────────
 
-        Yields state snapshots as the agent progresses through nodes.
+    def _build_tools(self, context: RAGContext) -> ToolRegistry:
+        """Build a ToolRegistry from context dependencies.
+
+        Follows the protocol: reads retriever/llm/graph from context,
+        never creates its own instances.
         """
-        try:
-            state = self._prepare_state(query)
-            graph = get_agent_graph()
+        retrieval: Optional[RetrieverProtocol] = getattr(context, "retriever", None)
+        llm: Any = getattr(context, "llm", None)
+        graph: Optional[GraphRetrieverProtocol] = getattr(context, "graph", None)
 
-            async for event in graph.astream(state):
-                for node_name, node_state in event.items():
-                    yield {
-                        "type": "agent_step",
-                        "node": node_name,
-                        "snapshot": state_snapshot(node_state),
-                    }
-            yield {"type": "done", "answer": node_state.get("answer", "")}
+        registry = ToolRegistry()
 
-        except ImportError:
-            yield {"type": "error", "message": "LangGraph not available"}
-        except Exception as exc:
-            logger.error("Agent stream failed: %s", exc)
-            yield {"type": "error", "message": str(exc)}
+        if retrieval is not None:
+            registry.register(VectorSearchTool(retrieval))
+        if graph is not None:
+            registry.register(GraphSearchTool(graph))
+        if llm is not None:
+            registry.register(DocumentSummaryTool(llm))
+        registry.register(AnswerVerifyTool())
 
-    # ── Helpers ───────────────────────────────────────────────────────
+        return registry
 
-    def _build_response(
-        self, query: RAGQuery, final_state: AgentState, t0: float
-    ) -> RAGResponse:
-        """Build a RAGResponse from the final AgentState."""
-        answer = final_state.get("answer") or ""
-        status = final_state.get("status", AgentStatus.COMPLETED.value)
-        citations_raw = final_state.get("citations", [])
+    def _build_result(
+        self,
+        state: AgentRunState,
+        context: RAGContext,
+        trace_id: str,
+        t0: float,
+        warnings: List[str],
+    ) -> RAGResult:
+        """Convert AgentRunState → RAGResult with citations and trace."""
+        answer = state.final_answer or ""
+        errors = list(state.errors)
 
-        # Convert citations
-        citations = [
-            RAGCitation(
-                chunk_id=c.get("chunk_id", ""),
-                document_id=c.get("document_id", ""),
-                text_snippet=c.get("snippet", ""),
-            )
-            for c in citations_raw
-        ]
+        # ── Build citations from tool results ───────────────────────────
+        citations: List[RAGCitation] = []
+        hits: List[RAGChunk] = []
 
-        # Build context from retrieved chunks
-        chunks = [
-            RAGChunk(
-                content=c.get("content", ""),
-                source=RAGSource(
-                    document_id=c.get("source", "unknown"),
-                    score=c.get("score"),
-                ),
-            )
-            for c in final_state.get("retrieved_chunks", [])
-        ]
+        for key in ("vector_search", "graph_search"):
+            val = state.tool_results.get(key)
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict):
+                        chunk_id = item.get("chunk_id", "")
+                        doc_id = item.get("source", item.get("document_id", ""))
+                        content = item.get("content", "")
+                        score = item.get("score")
 
-        # Extract token usage if available
-        token_usage: Dict[str, int] = {}
-        if "token_usage" in final_state:
-            token_usage = dict(final_state.get("token_usage", {}))  # type: ignore[arg-type]
+                        if chunk_id and doc_id:
+                            citations.append(RAGCitation(
+                                chunk_id=chunk_id,
+                                document_id=doc_id,
+                                text_snippet=content[:200] if content else "",
+                            ))
 
-        latency = (time.perf_counter() - t0) * 1000
+                        hits.append(RAGChunk(
+                            chunk_id=chunk_id or f"chunk_{len(hits)}",
+                            content=content,
+                            source=RAGSource(
+                                document_id=doc_id or "unknown",
+                                score=score,
+                            ),
+                        ))
+            elif isinstance(val, dict) and val.get("chunks"):
+                for chunk in val["chunks"]:
+                    if isinstance(chunk, dict):
+                        chunk_id = chunk.get("chunk_id", "")
+                        doc_id = chunk.get("source", chunk.get("document_id", ""))
+                        content = chunk.get("content", "")
+                        if chunk_id and doc_id:
+                            citations.append(RAGCitation(
+                                chunk_id=chunk_id,
+                                document_id=doc_id,
+                                text_snippet=content[:200] if content else "",
+                            ))
+                        hits.append(RAGChunk(
+                            chunk_id=chunk_id or f"chunk_{len(hits)}",
+                            content=content,
+                            source=RAGSource(document_id=doc_id or "unknown"),
+                        ))
 
-        error_msg: Optional[str] = None
-        if status == AgentStatus.FAILED.value:
-            error_msg = final_state.get("fatal_error") or "Agent workflow failed"
-        elif status == AgentStatus.DEGRADED.value:
-            error_msg = "Agent completed with degradation"
-        elif final_state.get("fallback_used"):
-            status = AgentStatus.DEGRADED.value
-            error_msg = "Fallback was used during agent execution"
+        # Use state.citations if available (from _generate method)
+        if not citations and state.citations:
+            for c in state.citations:
+                citations.append(RAGCitation(
+                    chunk_id=c.get("chunk_id", ""),
+                    document_id=c.get("document_id", ""),
+                    text_snippet=c.get("text_snippet", "")[:200],
+                ))
+                hits.append(RAGChunk(
+                    chunk_id=c.get("chunk_id", ""),
+                    content=c.get("text_snippet", ""),
+                    source=RAGSource(document_id=c.get("document_id", "")),
+                ))
 
-        return RAGResponse(
-            query_id=query.query_id,
+        # ── Record trace ────────────────────────────────────────────────
+        recorder = context.trace_recorder
+        if recorder is not None:
+            try:
+                self._record(context, TraceStage.INTENT,
+                             request_summary(state.query),
+                             f"tools={state.selected_tools}",
+                             (time.perf_counter() - t0) * 1000)
+            except Exception:
+                pass
+
+        # ── Collect warnings ────────────────────────────────────────────
+        if state.status == "failed":
+            warnings.extend(errors)
+        if state.tool_results.get("__all_tools_failed__"):
+            warnings.append("All tools failed — answer from LLM knowledge only")
+        degradation_notes = [e for e in errors if "degrad" in e.lower()]
+        warnings.extend(degradation_notes)
+
+        return RAGResult(
             answer=answer,
-            strategy=StrategyType.AGENTIC,
-            context=RAGContext(
-                query=query.text,
-                chunks=chunks,
-                retrieval_method="agent",
-                retrieval_latency_ms=None,
-            ),
             citations=citations,
-            latency_ms=latency,
-            token_usage=token_usage,
-            error=error_msg,
-            metadata={
-                "agent_status": status,
-                "iterations": final_state.get("iteration_count", 0),
-                "plan": final_state.get("plan", []),
-                "reasoning_steps": len(final_state.get("reasoning_chain", [])),
-                "errors": final_state.get("errors", []),
-                "tools_used": list(final_state.get("tool_results", {}).keys()),
-                "steps": [
-                    {
-                        "action": s.get("action"),
-                        "tool": s.get("tool_name"),
-                        "error": s.get("error"),
-                    }
-                    for s in final_state.get("steps", [])
-                ],
-            },
+            hits=hits,
+            warnings=warnings,
+            usage=_extract_usage(state),
         )
 
-    async def _fallback_run(self, query: RAGQuery, t0: float) -> RAGResponse:
-        """Simple retrieve → generate fallback when the agent workflow is unavailable."""
-        try:
-            context = await self.retrieve(query)
-            response = await self.generate(context, query)
-            response.latency_ms = (time.perf_counter() - t0) * 1000
-            response.metadata["fallback"] = True
-            response.metadata["fallback_reason"] = "Agent workflow unavailable"
-            return response
-        except Exception as exc:
-            return RAGResponse(
-                query_id=query.query_id,
-                answer="",
-                strategy=StrategyType.AGENTIC,
-                error=f"Agentic RAG failed completely: {exc}",
-                latency_ms=(time.perf_counter() - t0) * 1000,
-            )
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def _extract_usage(state: AgentRunState) -> Dict[str, int]:
+    """Extract approximate token usage from state metadata."""
+    answer_len = len(state.final_answer or "")
+    # Rough estimate: 1 token ≈ 4 chars
+    completion_tokens = max(1, answer_len // 4)
+    prompt_tokens = max(1, len(state.query) // 4 + len(state.selected_tools) * 50)
+    return {
+        "prompt": prompt_tokens,
+        "completion": completion_tokens,
+        "total": prompt_tokens + completion_tokens,
+    }
+
+
+def request_summary(query: str) -> str:
+    return f"query={query[:80]}"
 
 
 # ── Auto-register ─────────────────────────────────────────────────────────
+
 
 try:
     _reg = get_registry()
