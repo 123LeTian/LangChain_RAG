@@ -1,0 +1,61 @@
+/*
+ * 全局样式 — LangChain RAG 前端
+ * 定义 CSS 变量、基础重置与全局排版
+ */
+
+/* ===== CSS 变量（亮色主题） ===== */
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #ebebeb;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-muted: #8888a0;
+  --border-color: #e0e0e6;
+  --accent: #6c5ce7;       /* 主色调：紫 */
+  --success: #00b894;       /* 成功：绿 */
+  --danger: #d63031;        /* 危险：红 */
+  --warning: #fdcb6e;       /* 警告：黄 */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+/* ===== 基础重置 ===== */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* ===== 通用组件样式 ===== */
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button:disabled, input:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+
+select, input[type="text"], input[type="number"], textarea {
+  font-family: inherit; font-size: inherit;
+}
+
+.btn-primary {
+  padding: 8px 16px; background: var(--accent); color: white;
+  border: none; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+.btn-primary:hover { opacity: 0.9; }
+
