@@ -1,4 +1,9 @@
-"""Reranker module with Chinese-aware keyword matching."""
+"""Reranker module with Chinese-aware keyword matching.
+
+Key improvement: extracts the most important Chinese key phrases from the query
+and gives massive boosts when they appear as contiguous substrings in the chunk.
+This prevents common single-character trigrams from flooding results.
+"""
 from abc import ABC, abstractmethod
 import re
 from typing import List
@@ -6,11 +11,7 @@ from src.models.schemas import RetrievalHit
 
 
 def _tokenize_zh(text: str) -> set:
-    """Tokenize Chinese+mixed text into meaningful units.
-
-    Uses trigrams for better precision than bigrams:
-    "归母净利润" -> {归, 母, 净, 利, 润, 归母, 母净, 净利, 利润, 归母净, 母净利, 净利润}
-    """
+    """Tokenize Chinese+mixed text into unigrams, bigrams, and trigrams."""
     tokens = set()
     raw_words = re.findall(r"[\w]+", text.lower())
     for word in raw_words:
@@ -20,37 +21,64 @@ def _tokenize_zh(text: str) -> set:
         for seg in chinese_part:
             n = len(seg)
             for i in range(n):
-                # unigram
                 tokens.add(seg[i])
-                # bigram
                 if i < n - 1:
                     tokens.add(seg[i:i+2])
-                # trigram (key for precision)
                 if i < n - 2:
                     tokens.add(seg[i:i+3])
     return tokens
 
 
-def _find_best_snippet(text: str, query_tokens: set, window: int = 100) -> str:
-    """Find the text window with highest token overlap for preview."""
-    if not query_tokens or not text:
-        return text[:120]
-    # Score each position by counting matched token starts
-    best_score = 0
-    best_pos = 0
-    step = 20
-    for pos in range(0, max(1, len(text) - window), step):
-        snippet = text[pos:pos + window]
-        snip_tokens = _tokenize_zh(snippet)
-        score = len(query_tokens & snip_tokens)
-        if score > best_score:
-            best_score = score
-            best_pos = pos
-    start = max(0, best_pos)
-    end = min(len(text), best_pos + window)
-    prefix = "..." if start > 0 else ""
-    suffix = "..." if end < len(text) else ""
-    return prefix + text[start:end].replace("\n", " ") + suffix
+def _extract_key_phrases(query: str) -> List[str]:
+    """Extract the most important Chinese substrings from the query.
+
+    Returns phrases sorted by length (longest first), which are most
+    discriminative for matching specific financial terms.
+    """
+    zh_segs = re.findall(r"[\u4e00-\u9fff]+", query)
+    phrases = []
+    for seg in zh_segs:
+        n = len(seg)
+        if n <= 2:
+            phrases.append(seg)
+            continue
+        for length in range(n, 1, -1):
+            for i in range(n - length + 1):
+                sub = seg[i:i+length]
+                if len(sub) >= 2:
+                    phrases.append(sub)
+    seen = set()
+    result = []
+    for p in phrases:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
+
+def _phrase_boost(query: str, text_lower: str) -> float:
+    """Calculate phrase boost based on contiguous key-phrase matches.
+
+    Longer matches get exponentially higher boosts:
+    - 6+ char match: 0.45
+    - 4-5 char match: 0.30
+    - 3 char match: 0.18
+    - 2 char match: 0.08
+    """
+    phrases = _extract_key_phrases(query)
+    best_boost = 0.0
+    for phrase in phrases:
+        plen = len(phrase)
+        if phrase in text_lower:
+            if plen >= 6:
+                best_boost = max(best_boost, 0.45)
+            elif plen >= 4:
+                best_boost = max(best_boost, 0.30)
+            elif plen >= 3:
+                best_boost = max(best_boost, 0.18)
+            elif plen >= 2:
+                best_boost = max(best_boost, 0.08)
+    return best_boost
 
 
 class BaseReranker(ABC):
@@ -62,12 +90,12 @@ class BaseReranker(ABC):
 
 
 class SimpleReranker(BaseReranker):
-    """Simple reranker with Chinese trigram matching + exact phrase boost.
+    """Reranker with Chinese key-phrase matching.
 
-    Scoring:
-      - Exact phrase match: +0.3 (huge boost)
-      - Trigram overlap ratio: up to 0.3
-      - Original vector score: 0.4
+    Scoring (total ~1.0):
+      - Vector score: 0.30 (original embedding similarity)
+      - Key-phrase contiguous boost: up to 0.45 (longest match wins)
+      - Trigram overlap: up to 0.25 (supplementary)
     """
 
     def rerank(self, query: str, hits: List[RetrievalHit], top_k: int = 5) -> List[RetrievalHit]:
@@ -75,28 +103,11 @@ class SimpleReranker(BaseReranker):
         scored = []
         for hit in hits:
             text_lower = hit.chunk.text.lower()
-            # Exact phrase boost
-            phrase_boost = 0.0
-            if query.lower() in text_lower:
-                phrase_boost = 0.3
-            # Also check if key 3+ char substrings appear
-            else:
-                # Check for important substrings of length 3+
-                chinese_segs = re.findall(r"[\u4e00-\u9fff]+", query)
-                for seg in chinese_segs:
-                    if len(seg) >= 3 and seg in text_lower:
-                        phrase_boost = max(phrase_boost, 0.15)
-                    elif len(seg) >= 2 and seg in text_lower:
-                        phrase_boost = max(phrase_boost, 0.08)
-
-            # Token overlap
+            pboost = _phrase_boost(query, text_lower)
             text_tokens = _tokenize_zh(hit.chunk.text)
             overlap = len(query_tokens & text_tokens)
             match_ratio = overlap / max(len(query_tokens), 1)
-
-            # Final score: vector + keyword + phrase boost
-            new_score = hit.score * 0.4 + match_ratio * 0.3 + phrase_boost
-
+            new_score = hit.score * 0.30 + pboost + match_ratio * 0.25
             scored.append((new_score, hit))
         scored.sort(key=lambda x: x[0], reverse=True)
         result = []

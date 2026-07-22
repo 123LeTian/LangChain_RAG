@@ -1,4 +1,20 @@
 models:
+  - id: deepseek-chat
+    provider: deepseek
+    display_name: DeepSeek Chat
+    model_name: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    description: DeepSeek V3 chat model via OpenAI-compatible API.
+    supports_stream: true
+    supports_tools: true
+    supports_vision: false
+    enabled: true
+    is_default: true
+    is_builtin: true
+    key_required: true
+    key_scope: independent
+
   - id: mock-chat
     provider: mock
     display_name: Mock Chat
@@ -10,4 +26,7 @@ models:
     supports_tools: false
     supports_vision: false
     enabled: true
-    is_default: true
+    is_default: false
+    is_builtin: true
+    key_required: false
+    key_scope: not_required

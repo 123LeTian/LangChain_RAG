@@ -1,13 +1,11 @@
 """LLM-powered query rewriter for RAG.
 
 Uses DeepSeek to rewrite user queries into multiple search-friendly variants.
-For example, "半年利润" -> ["归属于母公司股东的净利润", "半年度净利润", "利润总额"].
-This improves retrieval recall by expanding vague queries into precise terms.
+Generates SHORT, focused search terms rather than full sentences.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 from typing import List
@@ -16,24 +14,14 @@ from src.retrieval.query_rewriter import QueryRewriterProtocol, normalize_querie
 
 
 class LLMQueryRewriter:
-    """Rewrite queries using DeepSeek LLM for better retrieval coverage.
-
-    Instead of a simple callable adapter, this uses a real LLM to:
-    1. Expand abbreviations (半年利润 -> 半年度净利润)
-    2. Generate synonyms (利润 -> 净利润, 利润总额, 归母净利润)
-    3. Produce formal document-style queries
-    """
+    """Rewrite queries using DeepSeek LLM for better retrieval coverage."""
 
     def __init__(self, llm=None):
-        """Initialize with an optional pre-configured LLM instance."""
         self._llm = llm
-        self._init_lock = asyncio.Lock()
 
     def _get_llm(self):
-        """Lazily create LLM if not provided."""
         if self._llm is not None:
             return self._llm
-
         from langchain_openai import ChatOpenAI
         self._llm = ChatOpenAI(
             model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
@@ -45,48 +33,34 @@ class LLMQueryRewriter:
         return self._llm
 
     def _build_prompt(self, query: str, max_queries: int) -> str:
-        """Build the rewrite prompt for the LLM."""
+        """Build the rewrite prompt for the LLM.
+
+        Instructs DeepSeek to generate SHORT, focused search terms (2-8 chars)
+        without company names or stock codes.
+        """
         return (
-            "你是一个查询改写助手。用户的问题可能含糊或口语化，"
-            "请将其改写为更精确的检索查询，以便在知识库中找到相关文档。\n\n"
-            "规则：\n"
-            "1. 保留原始查询的含义\n"
-            "2. 使用正式文档中可能出现的术语\n"
-            "3. 生成同义词和变体\n"
-            f"4. 最多生成 {max_queries} 个改写查询\n"
-            "5. 每行一个查询，不要编号\n\n"
-            f"用户问题：{query}\n\n"
-            "改写查询："
+            "\u4f60\u662f\u67e5\u8be2\u6539\u5199\u52a9\u624b\u3002"
+            "\u5c06\u7528\u6237\u95ee\u9898\u6539\u5199\u4e3a\u7b80\u77ed\u7684\u68c0\u7d22\u8bcd\u3002\n\n"
+            "\u89c4\u5219\uff1a\n"
+            "1. \u6bcf\u4e2a\u67e5\u8be2\u53ea\u5305\u542b\u5173\u952e\u8d22\u52a1\u672f\u8bed\uff0c2-8\u4e2a\u5b57\n"
+            "2. \u4e0d\u8981\u5305\u542b\u516c\u53f8\u540d\u3001\u80a1\u7968\u4ee3\u7801\u7b49\u5e38\u89c1\u8bcd\n"
+            "3. \u751f\u6210\u540c\u4e49\u8bcd\u548c\u53d8\u4f53\n"
+            f"4. \u6700\u591a {max_queries} \u4e2a\uff0c\u6bcf\u884c\u4e00\u4e2a\uff0c\u65e0\u7f16\u53f7\n\n"
+            f"\u95ee\u9898\uff1a{query}\n\n"
+            "\u6539\u5199\uff1a"
         )
 
     def _parse_response(self, response_text: str) -> List[str]:
-        """Parse LLM response into a list of queries."""
         lines = response_text.strip().split("\n")
         queries = []
         for line in lines:
-            # Remove numbering like "1. " or "- " or "（1）"
-            cleaned = re.sub(r'^[\d\-•（(][\d）).]*\s*', '', line).strip()
-            # Remove quotes
-            cleaned = cleaned.strip('"\'「」""')
+            cleaned = re.sub(r"^[\d\-\u2500\u3010(][\d\uff1a.]*\s*", "", line).strip()
+            cleaned = cleaned.strip("\"'")
             if cleaned and len(cleaned) > 1:
                 queries.append(cleaned)
         return queries
 
-    async def rewrite(
-        self,
-        query: str,
-        *,
-        max_queries: int = 3,
-    ) -> List[str]:
-        """Rewrite a query into multiple variants using LLM.
-
-        Args:
-            query: Original user query.
-            max_queries: Max number of rewritten queries (excluding original).
-
-        Returns:
-            List of queries including the original + rewrites.
-        """
+    async def rewrite(self, query: str, *, max_queries: int = 3) -> List[str]:
         try:
             llm = self._get_llm()
             prompt = self._build_prompt(query, max_queries)
@@ -98,12 +72,9 @@ class LLMQueryRewriter:
             return [query.strip()]
 
 
-# Singleton instance (lazy LLM init)
 _rewriter: LLMQueryRewriter | None = None
 
-
 def get_query_rewriter(llm=None) -> LLMQueryRewriter:
-    """Get or create the singleton LLMQueryRewriter."""
     global _rewriter
     if _rewriter is None:
         _rewriter = LLMQueryRewriter(llm=llm)

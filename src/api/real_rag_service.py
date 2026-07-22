@@ -39,10 +39,27 @@ _load_env()
 
 
 _CHAT_PATTERNS = [
-    "hello", "hi", "thanks", "thank you",
+    # English
+    "hello", "hi", "hey", "thanks", "thank you",
     "today", "time", "date", "day", "week",
     "what can you do", "help me", "function",
-    "write", "translate",
+    "write", "translate", "who are you", "how are you",
+    # Chinese (using unicode escapes to avoid encoding issues)
+    "\u4f60\u597d",     # ni hao
+    "\u4f60\u662f\u8c01",  # ni shi shui
+    "\u4f60\u662f\u4ec0\u4e48",  # ni shi shenme
+    "\u8c22\u8c22",     # xie xie
+    "\u4eca\u5929",     # jin tian
+    "\u65f6\u95f4",     # shi jian
+    "\u65e5\u671f",     # ri qi
+    "\u5468\u51e0",     # zhou ji
+    "\u661f\u671f",     # xing qi
+    "\u80fd\u505a\u4ec0\u4e48",  # neng zuo shenme
+    "\u5e2e\u6211",     # bang wo
+    "\u7ffb\u8bd1",     # fan yi
+    "\u5199\u4e00",     # xie yi (write a...)
+    "\u4f60\u53eb\u4ec0\u4e48",  # ni jiao shenme
+    "\u4f60\u662f\u54ea\u4e2a",  # ni shi nage
 ]
 
 
@@ -364,12 +381,18 @@ class RealRAGService:
             t0 = time.time()
             all_hits = []
             seen_chunks = set()
-            for rq in rewritten_queries:
+            # Original query (first in list) gets priority + score boost
+            # so rewritten queries expand the candidate pool but don't dominate
+            for qi, rq in enumerate(rewritten_queries):
                 r_hits = await asyncio.to_thread(self.retriever.retrieve, rq, config["top_k"])
+                boost = 1.2 if qi == 0 else 1.0  # 20% boost for original query
                 for h in r_hits:
                     if h.chunk.id not in seen_chunks:
                         seen_chunks.add(h.chunk.id)
-                        all_hits.append(h)
+                        all_hits.append(h if boost == 1.0 else type(h)(
+                            chunk=h.chunk, score=h.score * boost,
+                            rank=h.rank, retriever=h.retriever, metadata=h.metadata,
+                        ))
             all_hits.sort(key=lambda h: -h.score)
             hits = all_hits[:config["top_k"]]
 

@@ -71,6 +71,18 @@ class RAGGateway:
                     yield event
                 return
 
+            # If no rag_mode specified, stream directly via LLM (daily chat)
+            if not rag_mode:
+                async for event in self._stream_direct_llm(
+                    original_question=original_question,
+                    model_config=model_config,
+                    model_id=model_id,
+                    request_id=request_id,
+                    started_at=started_at,
+                ):
+                    yield event
+                return
+
             self._validate_model_for_real_rag(model_config)
             request = self._build_request(
                 session_id=session_id,
@@ -171,6 +183,85 @@ class RAGGateway:
             yield {
                 "type": "error",
                 "message": self._friendly_error_message(exc),
+                "request_id": request_id,
+                "retry_count": 0,
+            }
+
+
+    async def _stream_direct_llm(
+        self,
+        *,
+        original_question: str,
+        model_config: Optional[Any],
+        model_id: Optional[str],
+        request_id: Optional[str],
+        started_at: float,
+    ) -> AsyncIterator[ChatStreamEvent]:
+        """Stream a direct LLM response without RAG retrieval (daily chat)."""
+        from src.chat.llm_client_factory import LLMClientFactory
+
+        factory = LLMClientFactory()
+        llm = factory.create_chat_model(
+            model_config,
+            temperature=0.7,
+            max_tokens=1000,
+            streaming=True,
+        )
+
+        provider = getattr(model_config, "provider", None) or "default"
+        model_name = getattr(model_config, "model_name", None) or model_id or "default"
+
+        trace = [{
+            "stage": "model",
+            "duration_ms": 0,
+            "input_summary": "direct chat (no RAG)",
+            "output_summary": f"Streaming via {model_id or model_name}",
+            "metadata": {
+                "model_id": model_id or model_name,
+                "provider": provider,
+                "model_name": model_name,
+            },
+        }]
+        yield {"type": "trace", "trace": trace}
+
+        full_content = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        try:
+            for chunk in llm.stream(original_question):
+                delta = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if delta:
+                    full_content += delta
+                    yield {"type": "chunk", "content": delta}
+
+            try:
+                if hasattr(llm, "get_last_response_metadata"):
+                    meta = llm.get_last_response_metadata()
+                    usage = meta.get("usage", {}) if meta else {}
+                    prompt_tokens = usage.get("prompt_tokens", 0)
+                    completion_tokens = usage.get("completion_tokens", 0)
+            except Exception:
+                pass
+            if not completion_tokens:
+                completion_tokens = len(full_content)
+
+            yield {
+                "type": "done",
+                "content": full_content,
+                "citations": [],
+                "trace": trace,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "model_id": model_id or model_name,
+                "request_id": request_id,
+                "retry_count": 0,
+            }
+        except Exception as exc:
+            yield {
+                "type": "error",
+                "message": str(exc),
                 "request_id": request_id,
                 "retry_count": 0,
             }
