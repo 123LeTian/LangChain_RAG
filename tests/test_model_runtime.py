@@ -10,8 +10,8 @@ from src.chat.model_registry import ChatModel, ModelRegistry
 from src.chat.model_runtime import ModelRuntimeError, resolve_runtime_config
 
 
-def test_registry_default_model_resolves():
-    model = ModelRegistry().default_model()
+def test_registry_default_model_resolves(tmp_path):
+    model = ModelRegistry(custom_path=tmp_path / "custom_models.json").default_model()
 
     assert model.id == "mock-chat"
     assert model.provider == "mock"

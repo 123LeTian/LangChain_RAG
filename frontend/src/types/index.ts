@@ -140,6 +140,18 @@ export interface GraphData {
   links: GraphLink[]
   communities: Community[]
   hit_path: string[]
+  model?: Partial<ChatModel>
+  build?: {
+    mode: string
+    model_id: string
+    entity_count: number
+    relationship_count: number
+    community_count: number
+    report_count: number
+    duration_ms: number
+    warnings: string[]
+  }
+  metadata?: Record<string, any>
 }
 
 // ========== 评测 ==========

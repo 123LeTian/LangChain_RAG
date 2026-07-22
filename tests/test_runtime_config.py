@@ -123,7 +123,7 @@ models:
     monkeypatch.setenv("MODELS_CONFIG_PATH", str(model_config))
     reset_runtime_config()
 
-    registry = ModelRegistry()
+    registry = ModelRegistry(custom_path=tmp_path / "custom_models.json")
 
     assert registry.config_path == model_config
     assert registry.default_model().id == "custom-default"

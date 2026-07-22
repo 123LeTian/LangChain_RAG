@@ -424,8 +424,16 @@ export async function getTrace(traceId: string): Promise<TraceEvent[]> {
   return request(`/api/traces/${traceId}`)
 }
 
-export async function getGraphData(kbId: string): Promise<GraphData> {
-  return request(`/api/graphs/${kbId}`)
+export async function getGraphData(kbId: string, modelId?: string): Promise<GraphData> {
+  const query = modelId ? `?model_id=${encodeURIComponent(modelId)}` : ''
+  return request(`/api/graphs/${kbId}${query}`)
+}
+
+export async function updateGraphModel(kbId: string, modelId: string): Promise<{ kb_id: string; model: ChatModel }> {
+  return request(`/api/graphs/${kbId}/model`, {
+    method: 'PATCH',
+    body: JSON.stringify({ model_id: modelId }),
+  })
 }
 
 export async function runEvaluation(kbId: string, modes: string[]): Promise<{ run_id: string }> {
