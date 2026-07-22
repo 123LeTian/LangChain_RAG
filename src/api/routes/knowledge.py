@@ -103,6 +103,50 @@ def _find_document(kb_id: str, doc_id: str) -> dict | None:
     return None
 
 
+def _document_chunk_count(doc: dict) -> int:
+    fpath = _PROJECT_ROOT / "documents" / str(doc.get("filename") or "")
+    if not fpath.exists():
+        return int(doc.get("chunk_count") or 0)
+    try:
+        from src.ingestion import LoaderFactory
+        from src.ingestion.splitter import split_documents
+
+        loaded = LoaderFactory.load(
+            fpath,
+            kb_id=str(doc.get("kb_id") or ""),
+            document_id=str(doc.get("id") or fpath.stem),
+        )
+        return len(split_documents(loaded, chunk_size=1500, chunk_overlap=300))
+    except Exception:
+        return int(doc.get("chunk_count") or 0)
+
+
+def _decorate_document(doc: dict) -> dict:
+    payload = dict(doc)
+    payload["chunk_count"] = _document_chunk_count(doc)
+    return payload
+
+
+def _decorate_kb(kb: dict) -> dict:
+    payload = dict(kb)
+    docs = [doc for doc in _MOCK_DOCS if doc.get("kb_id") == kb.get("id")]
+    payload["doc_count"] = len(docs)
+    payload["chunk_count"] = sum(_document_chunk_count(doc) for doc in docs)
+    return payload
+
+
+def _refresh_kb_counts(kb_id: str) -> None:
+    for doc in _MOCK_DOCS:
+        if doc.get("kb_id") == kb_id:
+            doc["chunk_count"] = _document_chunk_count(doc)
+    for kb in _MOCK_KBS:
+        if kb.get("id") == kb_id:
+            docs = [doc for doc in _MOCK_DOCS if doc.get("kb_id") == kb_id]
+            kb["doc_count"] = len(docs)
+            kb["chunk_count"] = sum(int(doc.get("chunk_count") or 0) for doc in docs)
+            break
+
+
 # ============================================================================
 # Knowledge base CRUD
 # ============================================================================
@@ -127,7 +171,7 @@ async def list_knowledge_bases(
     owner_id: str = "user_001",
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> list[dict]:
-    return list(_MOCK_KBS)
+    return [_decorate_kb(kb) for kb in _MOCK_KBS]
 
 
 @router.get("/{kb_id}")
@@ -137,7 +181,7 @@ async def get_knowledge_base(
 ) -> dict:
     for kb in _MOCK_KBS:
         if kb["id"] == kb_id:
-            return kb
+            return _decorate_kb(kb)
     raise NotFoundError(f"KB {kb_id} not found")
 
 
@@ -202,12 +246,10 @@ async def upload_document(
         "chunk_count": 0,
         "size_bytes": len(content),
     }
+    doc["chunk_count"] = _document_chunk_count(doc)
     _MOCK_DOCS.append(doc)
 
-    for kb in _MOCK_KBS:
-        if kb["id"] == kb_id:
-            kb["doc_count"] = kb.get("doc_count", 0) + 1
-            break
+    _refresh_kb_counts(kb_id)
 
     _persist()
 
@@ -229,7 +271,7 @@ async def list_documents(
     kb_id: str,
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> list[dict]:
-    return [d for d in _MOCK_DOCS if d["kb_id"] == kb_id]
+    return [_decorate_document(d) for d in _MOCK_DOCS if d["kb_id"] == kb_id]
 
 
 @router.get("/{kb_id}/documents/{doc_id}/preview")
@@ -287,6 +329,7 @@ async def delete_document(
                 pass
             break
     _MOCK_DOCS = [d for d in _MOCK_DOCS if not (d["id"] == doc_id and d["kb_id"] == kb_id)]
+    _refresh_kb_counts(kb_id)
     _persist()
     return None
 
@@ -300,6 +343,8 @@ async def create_index(
     kb_id: str,
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> dict:
+    _refresh_kb_counts(kb_id)
+    _persist()
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     _MOCK_JOBS[job_id] = {
         "job_id": job_id,

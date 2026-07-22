@@ -156,14 +156,41 @@ class _MockRetrieve:
     async def run(self, ctx: RAGContext, *, query: str, top_k: int = 5, **__kw: Any) -> RAGContext:
         # Try the real retriever first (injected via context)
         if ctx.retriever is not None:
+            kb_id = str(ctx.metadata.get("kb_id") or "").strip()
+            filters = ctx.config.get("filters") if isinstance(ctx.config, dict) else None
             try:
-                result = ctx.retriever.retrieve(query=query, top_k=top_k)
-                ctx.chunks = list(result.chunks)
+                if kb_id and callable(getattr(ctx.retriever, "search", None)):
+                    hits = ctx.retriever.search(
+                        query=query,
+                        kb_id=kb_id,
+                        top_k=top_k,
+                        filters=filters,
+                    )
+                    ctx.chunks = _hits_to_chunks(hits)
+                    ctx.total_candidates = len(ctx.chunks)
+                    ctx.retrieval_method = getattr(ctx.retriever, "retriever_name", "vector")
+                    ctx.metadata["retrieve_kb_id"] = kb_id
+                    ctx.metadata["retrieve_fallback"] = False
+                    return ctx
+
+                result = ctx.retriever.retrieve(
+                    query=query,
+                    top_k=top_k,
+                    kb_id=kb_id,
+                    filters=filters,
+                )
+                if hasattr(result, "chunks"):
+                    ctx.chunks = list(result.chunks)
+                else:
+                    ctx.chunks = _hits_to_chunks(result)
                 ctx.total_candidates = len(ctx.chunks)
                 ctx.retrieval_method = "vector"
+                ctx.metadata["retrieve_kb_id"] = kb_id
+                ctx.metadata["retrieve_fallback"] = False
                 return ctx
-            except Exception:
-                pass
+            except Exception as exc:
+                ctx.metadata["retrieve_fallback"] = True
+                ctx.metadata["retrieve_error"] = f"{type(exc).__name__}: {exc}"
 
         # Mock fallback: generate fake chunks
         mock_chunks = [
@@ -176,6 +203,7 @@ class _MockRetrieve:
         ctx.chunks = mock_chunks
         ctx.total_candidates = len(mock_chunks)
         ctx.retrieval_method = "mock"
+        ctx.metadata["retrieve_fallback"] = True
         return ctx
 
 
@@ -652,6 +680,36 @@ def _summarise_module_output(module_name: str, ctx: RAGContext) -> str:
     elif module_name == "compress":
         return f"{len(ctx.chunks)} chunks, {sum(len(c.content) for c in ctx.chunks)} chars"
     return f"done"
+
+
+def _hits_to_chunks(hits: Any) -> List[RAGChunk]:
+    """Convert B retrieval hits to C RAGChunk objects."""
+    chunks: List[RAGChunk] = []
+    for rank, hit in enumerate(list(hits or []), start=1):
+        chunk = getattr(hit, "chunk", None)
+        if chunk is None:
+            continue
+        metadata = dict(getattr(chunk, "metadata", {}) or {})
+        hit_metadata = dict(getattr(hit, "metadata", {}) or {})
+        metadata.update(hit_metadata)
+        metadata.setdefault("rank", getattr(hit, "rank", rank))
+        metadata.setdefault("retriever", getattr(hit, "retriever", "vector"))
+        chunks.append(
+            RAGChunk(
+                chunk_id=str(getattr(chunk, "id", "") or f"chunk-{rank}"),
+                content=str(getattr(chunk, "text", "") or ""),
+                source=RAGSource(
+                    document_id=str(getattr(chunk, "document_id", "") or "unknown"),
+                    chunk_index=int(getattr(chunk, "index", rank - 1) or 0),
+                    source_path=metadata.get("filename") or metadata.get("source"),
+                    title=metadata.get("section") or metadata.get("filename"),
+                    page=metadata.get("page"),
+                    score=getattr(hit, "score", None),
+                    metadata=metadata,
+                ),
+            )
+        )
+    return chunks
 
 
 def _build_citations(chunks: List[RAGChunk]) -> List[RAGCitation]:

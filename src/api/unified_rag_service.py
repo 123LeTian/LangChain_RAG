@@ -106,6 +106,45 @@ def _int_option(options: Any, key: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _load_document_specs(project_root: Path, docs_dir: Path) -> list[dict[str, Any]]:
+    """Load document records with their real kb_id; fall back to all files."""
+    data_path = project_root / "data" / "knowledge_bases.json"
+    specs: list[dict[str, Any]] = []
+    if data_path.exists():
+        try:
+            data = json.loads(data_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        for index, record in enumerate(data.get("docs") or []):
+            if not isinstance(record, dict):
+                continue
+            filename = str(record.get("filename") or "").strip()
+            kb_id = str(record.get("kb_id") or "").strip()
+            if not filename or not kb_id:
+                continue
+            path = docs_dir / filename
+            if not path.exists():
+                continue
+            specs.append(
+                {
+                    "path": path,
+                    "kb_id": kb_id,
+                    "document_id": str(record.get("id") or f"doc-{index:03d}"),
+                }
+            )
+    if specs:
+        return specs
+
+    supported = [".txt", ".md", ".markdown", ".pdf", ".docx"]
+    files = []
+    for ext in supported:
+        files.extend(docs_dir.glob(f"**/*{ext}"))
+    return [
+        {"path": path, "kb_id": "default", "document_id": f"doc-{index:03d}"}
+        for index, path in enumerate(files)
+    ]
+
+
 class RequestLLMAdapter:
     """Normalize LangChain chat models to the generator protocol used by RAG."""
 
@@ -196,23 +235,24 @@ class UnifiedRAGApiService:
         docs_dir.mkdir(exist_ok=True)
 
         print("[UnifiedRAG] Loading documents...", flush=True)
-        supported = [".txt", ".md", ".markdown", ".pdf", ".docx"]
-        files = []
-        for ext in supported:
-            files.extend(docs_dir.glob(f"**/*{ext}"))
+        doc_specs = _load_document_specs(project_root, docs_dir)
 
-        if not files:
+        if not doc_specs:
             raise RuntimeError("documents/ is empty - please add documents first")
 
         documents = []
-        for i, fpath in enumerate(files):
+        for spec in doc_specs:
+            fpath = spec["path"]
             try:
                 doc = LoaderFactory.load(
-                    str(fpath), kb_id="default", document_id=f"doc-{i:03d}"
+                    str(fpath),
+                    kb_id=spec["kb_id"],
+                    document_id=spec["document_id"],
                 )
                 documents.append(doc)
                 print(
-                    f"[UnifiedRAG]   Loaded: {fpath.name} ({len(doc.text)} chars)",
+                    f"[UnifiedRAG]   Loaded: {fpath.name} "
+                    f"(kb={spec['kb_id']}, {len(doc.text)} chars)",
                     flush=True,
                 )
             except Exception as e:
@@ -269,21 +309,27 @@ class UnifiedRAGApiService:
 
             print("[UnifiedRAG] Building knowledge graph...", flush=True)
             builder = GraphIndexBuilder()
-            result = builder.build_from_chunks(kb_id="default", chunks=chunks)
-            self._graph_build_warnings = list(result.warnings)
+            self._graph_build_warnings = []
+            chunks_by_kb: dict[str, list] = {}
+            for chunk in chunks:
+                chunks_by_kb.setdefault(str(chunk.kb_id or "default"), []).append(chunk)
+
+            for kb_id, kb_chunks in chunks_by_kb.items():
+                result = builder.build_from_chunks(kb_id=kb_id, chunks=kb_chunks)
+                self._graph_build_warnings.extend(
+                    f"{kb_id}: {warning}" for warning in result.warnings
+                )
+                print(
+                    f"[UnifiedRAG]   Graph[{kb_id}]: {result.entity_count} entities, "
+                    f"{result.relationship_count} relationships, "
+                    f"{result.community_count} communities, "
+                    f"{result.report_count} reports",
+                    flush=True,
+                )
 
             self.graph_retriever = GraphRetriever(repository=builder.repository)
-
-            print(
-                f"[UnifiedRAG]   Graph: {result.entity_count} entities, "
-                f"{result.relationship_count} relationships, "
-                f"{result.community_count} communities, "
-                f"{result.report_count} reports",
-                flush=True,
-            )
-            if result.warnings:
-                for w in result.warnings:
-                    print(f"[UnifiedRAG]   Graph warning: {w}", flush=True)
+            for warning in self._graph_build_warnings:
+                print(f"[UnifiedRAG]   Graph warning: {warning}", flush=True)
         except Exception as exc:
             self._graph_build_warnings.append(
                 f"Graph build failed: {type(exc).__name__}: {exc}"

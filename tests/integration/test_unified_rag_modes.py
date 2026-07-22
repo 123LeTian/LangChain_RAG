@@ -329,3 +329,105 @@ class TestModelConversion:
         assert api_result.hits[0].score == 0.95
         assert "detail" in api_result.usage
         assert api_result.mode == RAGMode.NAIVE
+
+
+class TestKnowledgeBaseIsolation:
+    """Regression tests for real KB IDs reaching the unified RAG pipeline."""
+
+    def test_document_specs_preserve_persisted_kb_id(self, tmp_path):
+        from src.api.unified_rag_service import _load_document_specs
+
+        docs_dir = tmp_path / "documents"
+        data_dir = tmp_path / "data"
+        docs_dir.mkdir()
+        data_dir.mkdir()
+        (docs_dir / "星河计划.txt").write_text("项目负责人：李明", encoding="utf-8")
+        (data_dir / "knowledge_bases.json").write_text(
+            (
+                '{"kbs":[{"id":"kb_star","name":"星河计划"}],'
+                '"docs":[{"id":"doc_star","kb_id":"kb_star","filename":"星河计划.txt"}]}'
+            ),
+            encoding="utf-8",
+        )
+
+        specs = _load_document_specs(tmp_path, docs_dir)
+
+        assert specs == [
+            {
+                "path": docs_dir / "星河计划.txt",
+                "kb_id": "kb_star",
+                "document_id": "doc_star",
+            }
+        ]
+
+    def test_modular_retrieve_passes_current_kb_id_to_search(self):
+        from src.models.rag import RAGContext
+        from src.models.schemas import ChunkRecord, RetrievalHit
+        from src.rag.strategies.modular import ModularRAGStrategy, ModuleConfig
+
+        class SearchRetriever:
+            retriever_name = "fake_search"
+
+            def __init__(self):
+                self.calls = []
+
+            def search(self, *, query, kb_id, top_k, filters=None):
+                self.calls.append(
+                    {"query": query, "kb_id": kb_id, "top_k": top_k, "filters": filters}
+                )
+                return [
+                    RetrievalHit(
+                        chunk=ChunkRecord(
+                            id="chunk-star",
+                            document_id="doc-star",
+                            kb_id=kb_id,
+                            text="项目负责人：李明",
+                            index=0,
+                            metadata={"filename": "星河计划.txt"},
+                        ),
+                        score=0.99,
+                        rank=1,
+                        retriever="fake_search",
+                    )
+                ]
+
+        class SimpleLLM:
+            async def generate(self, prompt, context):
+                return context
+
+        retriever = SearchRetriever()
+        context = RAGContext(
+            query="星河计划负责人是谁",
+            llm=SimpleLLM(),
+            retriever=retriever,
+            metadata={"kb_id": "kb_star"},
+            config={},
+        )
+        request = RAGRequest(
+            query="星河计划负责人是谁",
+            kb_id="kb_star",
+            mode=RAGMode.MODULAR,
+        )
+        strategy = ModularRAGStrategy(
+            ModuleConfig(
+                rewrite=False,
+                retrieve=True,
+                rerank=False,
+                compress=False,
+                verify=False,
+                top_k=3,
+            )
+        )
+
+        result = asyncio.run(strategy.run(request, context))
+
+        assert retriever.calls == [
+            {
+                "query": "星河计划负责人是谁",
+                "kb_id": "kb_star",
+                "top_k": 3,
+                "filters": None,
+            }
+        ]
+        assert result.hits[0].content == "项目负责人：李明"
+        assert result.citations[0].document_id == "doc-star"
