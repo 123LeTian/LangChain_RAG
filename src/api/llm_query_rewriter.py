@@ -90,7 +90,7 @@ class LLMQueryRewriter:
         try:
             llm = self._get_llm()
             prompt = self._build_prompt(query, max_queries)
-            response = await asyncio.to_thread(llm.invoke, prompt)
+            response = await llm.ainvoke(prompt)
             rewrites = self._parse_response(response.content)
             return normalize_queries(query, rewrites, max_queries=max_queries + 1)
         except Exception as e:

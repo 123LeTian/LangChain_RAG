@@ -137,8 +137,6 @@ class RealRAGService:
             SimpleReranker, ContextCompressor, CitationBuilder,
         )
         from src.rag.naive_support import build_naive_prompt
-        from langchain_openai import ChatOpenAI
-        from src.api.llm_query_rewriter import LLMQueryRewriter
 
         project_root = Path(__file__).resolve().parents[2]
         docs_dir = project_root / "documents"
@@ -169,8 +167,15 @@ class RealRAGService:
         chunks_docs = split_documents(documents, chunk_size=1500, chunk_overlap=300)
         print(f"[RAG]   {len(chunks_docs)} chunks", flush=True)
 
-        print("[RAG] Loading embedding model (bge-small-zh-v1.5)...", flush=True)
-        embedder = HuggingFaceEmbedder(model_name="BAAI/bge-small-zh-v1.5")
+        # Try local ModelScope download first, fall back to HuggingFace
+        local_model = project_root / "models" / "models" / "BAAI--bge-small-zh-v1.5" / "snapshots" / "master"
+        if local_model.exists():
+            model_path = str(local_model)
+            print(f"[RAG] Loading embedding model from local: {model_path}", flush=True)
+        else:
+            model_path = "BAAI/bge-small-zh-v1.5"
+            print("[RAG] Loading embedding model (bge-small-zh-v1.5)...", flush=True)
+        embedder = HuggingFaceEmbedder(model_name=model_path)
 
         def _doc_to_chunk(doc):
             meta = doc.metadata or {}
@@ -195,15 +200,6 @@ class RealRAGService:
         self.citation_builder = CitationBuilder()
         self.build_naive_prompt = build_naive_prompt
 
-        self.llm = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-            temperature=0.3,
-            max_tokens=1000,
-        )
-
-        self.query_rewriter = LLMQueryRewriter(llm=self.llm)
         self._initialized = True
         print(f"[RAG] Initialization complete!", flush=True)
 
@@ -212,6 +208,18 @@ class RealRAGService:
             if self._initialized:
                 return
             self.retriever = None
+            # Create LLM in main async thread to avoid httpx client lifecycle issues
+            if self.llm is None:
+                from langchain_openai import ChatOpenAI
+                self.llm = ChatOpenAI(
+                    model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                    api_key=os.getenv("DEEPSEEK_API_KEY"),
+                    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+                    temperature=0.3,
+                    max_tokens=1000,
+                )
+                from src.api.llm_query_rewriter import LLMQueryRewriter
+                self.query_rewriter = LLMQueryRewriter(llm=self.llm)
             print("[RAG] Starting initialization (in background thread)...", flush=True)
             await asyncio.to_thread(self._do_init)
 
@@ -263,7 +271,7 @@ class RealRAGService:
             'Reply JSON: {"passed": true/false, "issues": ["issue1", ...]}'
         )
         try:
-            response = await asyncio.to_thread(self.llm.invoke, verify_prompt)
+            response = await self.llm.ainvoke(verify_prompt)
             import json
             text = response.content.strip()
             # Try to extract JSON from response
@@ -314,8 +322,7 @@ class RealRAGService:
         if _is_chat_question(query_text):
             print(f"[RAG] Chat question (no retrieval): {query_text[:50]}", flush=True)
             t0 = time.time()
-            llm = self._create_llm()
-            response = await asyncio.to_thread(llm.invoke, query_text)
+            response = await self.llm.ainvoke(query_text)
             answer = response.content
             events.append(TraceEvent(
                 trace_id=trace_id,
@@ -502,7 +509,7 @@ class RealRAGService:
 
         t0 = time.time()
         prompt = self.build_naive_prompt(query_text, context)
-        response = await asyncio.to_thread(self.llm.invoke, prompt)
+        response = await self.llm.ainvoke(prompt)
         answer = response.content
 
         token_usage = {"total_tokens": len(answer)}
