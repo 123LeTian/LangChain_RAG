@@ -87,20 +87,20 @@ def test_stream_request_preset_reaches_rag_gateway(preset_client):
     with client.stream(
         "POST",
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "What is RAG?", "preset_id": "rigorous-report"},
+        json={"question": "What is RAG?", "preset_id": "teacher"},
     ) as response:
         assert response.status_code == 200
         _read_sse(response)
 
-    assert gateway.calls[-1]["preset_id"] == "rigorous-report"
-    assert gateway.calls[-1]["preset_config"].name == "严谨研报"
+    assert gateway.calls[-1]["preset_id"] == "teacher"
+    assert gateway.calls[-1]["preset_config"].name == "耐心导师"
 
 
 def test_stream_uses_session_preset_when_request_omits_preset(preset_client):
     client, gateway = preset_client
     session = client.post(
         "/api/chat/sessions",
-        json={"title": "chat", "preset_id": "concise-summary"},
+        json={"title": "chat", "preset_id": "translator"},
     ).json()
 
     with client.stream(
@@ -111,7 +111,7 @@ def test_stream_uses_session_preset_when_request_omits_preset(preset_client):
         assert response.status_code == 200
         _read_sse(response)
 
-    assert gateway.calls[-1]["preset_id"] == "concise-summary"
+    assert gateway.calls[-1]["preset_id"] == "translator"
 
 
 def test_stream_uses_default_preset_without_request_or_session_preset(preset_client):

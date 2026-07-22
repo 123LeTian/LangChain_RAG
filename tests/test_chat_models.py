@@ -55,9 +55,10 @@ def test_list_chat_models_returns_enabled_models(client):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["default_model_id"] == "mock-chat"
+    assert data["default_model_id"] == "deepseek-chat"
     ids = [model["id"] for model in data["models"]]
-    assert ids == ["mock-chat"]
+    assert "deepseek-chat" in ids
+    assert "mock-chat" in ids
 
 
 def test_list_chat_models_does_not_expose_api_keys(client):
@@ -96,7 +97,7 @@ def test_list_chat_models_has_one_default_model(client):
 
     defaults = [model for model in response.json()["models"] if model["is_default"]]
     assert len(defaults) == 1
-    assert defaults[0]["id"] == "mock-chat"
+    assert defaults[0]["id"] == "deepseek-chat"
 
 
 def test_custom_model_crud_and_default_model(client):

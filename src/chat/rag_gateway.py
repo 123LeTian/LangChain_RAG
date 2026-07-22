@@ -94,6 +94,8 @@ class RAGGateway:
                 trace = self._serialize_list(getattr(result, "trace", []))
                 citations = self._serialize_list(getattr(result, "citations", []))
                 usage = getattr(result, "usage", {}) or {}
+            except ChatRetryExhaustedError:
+                raise  # let outer except handler yield error event
             except Exception as rag_error:
                 # RAG unavailable (e.g. no documents) — fall back to direct chat
                 rag_msg = str(rag_error)

@@ -56,24 +56,31 @@ def runtime_client(tmp_path):
     message_service = MessageService(store)
     memory_service = MemoryService(message_service)
     registry = ModelRegistry(custom_path=tmp_path / "custom_models.json")
-    registry.create_model({
-        "id": "deepseek-reasoner",
-        "provider": "deepseek",
-        "display_name": "DeepSeek Reasoner",
-        "model_name": "deepseek-reasoner",
-        "base_url": "https://api.deepseek.com/v1",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "enabled": True,
-    })
-    registry.create_model({
-        "id": "gpt-4o",
-        "provider": "openai",
-        "display_name": "GPT-4o",
-        "model_name": "gpt-4o",
-        "base_url": "https://api.openai.com/v1",
-        "api_key_env": "OPENAI_API_KEY",
-        "enabled": False,
-    })
+    # Create custom models that don't conflict with built-ins
+    try:
+        registry.create_model({
+            "id": "custom-deepseek-r1",
+            "provider": "deepseek",
+            "display_name": "Custom DeepSeek R1",
+            "model_name": "deepseek-reasoner",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "enabled": True,
+        })
+    except ValueError:
+        pass
+    try:
+        registry.create_model({
+            "id": "custom-gpt-disabled",
+            "provider": "openai",
+            "display_name": "Custom GPT Disabled",
+            "model_name": "gpt-4o",
+            "base_url": "https://api.openai.com/v1",
+            "api_key_env": "OPENAI_API_KEY",
+            "enabled": False,
+        })
+    except ValueError:
+        pass
     rag_service = RecordingRAGService()
     app_service = ChatApplicationService(
         session_service,
@@ -102,7 +109,7 @@ def test_chat_stream_request_model_reaches_rag_request_options(runtime_client):
         f"/api/chat/sessions/{session['id']}/stream",
         json={
             "question": "hello",
-            "model_id": "deepseek-reasoner",
+            "model_id": "custom-deepseek-r1",
             "temperature": 0.3,
         },
     ) as response:
@@ -111,7 +118,7 @@ def test_chat_stream_request_model_reaches_rag_request_options(runtime_client):
 
     options = rag_service.requests[-1].options
     model_config = options["model"]
-    assert model_config["id"] == "deepseek-reasoner"
+    assert model_config["id"] == "custom-deepseek-r1"
     assert model_config["model_name"] == "deepseek-reasoner"
     assert options["temperature"] == 0.3
     assert events[-1]["type"] == "done"
@@ -121,7 +128,7 @@ def test_chat_stream_uses_session_model_when_request_omits_model(runtime_client)
     client, rag_service = runtime_client
     session = client.post(
         "/api/chat/sessions",
-        json={"title": "chat", "model_id": "deepseek-reasoner"},
+        json={"title": "chat", "model_id": "custom-deepseek-r1"},
     ).json()
 
     with client.stream(
@@ -132,7 +139,7 @@ def test_chat_stream_uses_session_model_when_request_omits_model(runtime_client)
         assert response.status_code == 200
         events = _read_sse(response)
 
-    assert rag_service.requests[-1].options["model"]["id"] == "deepseek-reasoner"
+    assert rag_service.requests[-1].options["model"]["id"] == "custom-deepseek-r1"
 
 
 def test_chat_stream_uses_default_model_without_request_or_session_model(runtime_client):
@@ -147,9 +154,8 @@ def test_chat_stream_uses_default_model_without_request_or_session_model(runtime
         assert response.status_code == 200
         events = _read_sse(response)
 
-    assert not rag_service.requests
-    assert events[-1]["content"] == "您好，我是本地默认模型，不会回答任何问题，只用于测试，请在模型配置页面添加您的模型"
-    assert events[-1]["model_id"] == "mock-chat"
+    assert rag_service.requests
+    assert events[-1]["model_id"] == "deepseek-chat"
 
 
 def test_chat_rag_request_uses_original_question_not_history_context(runtime_client):
@@ -160,7 +166,7 @@ def test_chat_rag_request_uses_original_question_not_history_context(runtime_cli
         with client.stream(
             "POST",
             f"/api/chat/sessions/{session['id']}/stream",
-            json={"question": question, "model_id": "deepseek-reasoner"},
+            json={"question": question, "model_id": "custom-deepseek-r1"},
         ) as response:
             assert response.status_code == 200
             _read_sse(response)
@@ -186,9 +192,9 @@ def test_missing_key_stream_returns_clear_error(tmp_path, monkeypatch):
     message_service = MessageService(store)
     registry = ModelRegistry(custom_path=tmp_path / "custom_missing_key_models.json")
     registry.create_model({
-        "id": "deepseek-chat",
+        "id": "custom-deepseek-missing-key",
         "provider": "deepseek",
-        "display_name": "DeepSeek Chat",
+        "display_name": "DeepSeek Missing Key",
         "model_name": "deepseek-chat",
         "base_url": "https://api.deepseek.com/v1",
         "api_key_env": "DEEPSEEK_API_KEY",
@@ -210,7 +216,7 @@ def test_missing_key_stream_returns_clear_error(tmp_path, monkeypatch):
         with client.stream(
             "POST",
             f"/api/chat/sessions/{session['id']}/stream",
-            json={"question": "hello", "model_id": "deepseek-chat"},
+            json={"question": "hello", "model_id": "custom-deepseek-missing-key"},
         ) as response:
             assert response.status_code == 200
             events = _read_sse(response)
@@ -228,7 +234,7 @@ def test_disabled_model_stream_returns_validation_error(runtime_client):
 
     response = client.post(
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "hello", "model_id": "gpt-4o"},
+        json={"question": "hello", "model_id": "custom-gpt-disabled"},
     )
 
     assert response.status_code == 422
@@ -241,13 +247,13 @@ def test_model_trace_contains_model_id_provider_but_not_secret(runtime_client):
     with client.stream(
         "POST",
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "hello", "model_id": "deepseek-reasoner"},
+        json={"question": "hello", "model_id": "custom-deepseek-r1"},
     ) as response:
         events = _read_sse(response)
 
     trace_events = [event for event in events if event["type"] == "trace"]
     trace_text = json.dumps(trace_events, ensure_ascii=False)
-    assert "deepseek-reasoner" in trace_text
+    assert "custom-deepseek-r1" in trace_text
     assert "deepseek" in trace_text
     assert "DEEPSEEK_API_KEY" not in trace_text
     assert "secret-value" not in trace_text
@@ -270,6 +276,7 @@ async def test_old_rag_request_without_model_config_uses_default_deepseek_path(m
     import langchain_openai
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-real")

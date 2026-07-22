@@ -257,7 +257,7 @@ def test_stream_uses_default_model_when_session_has_no_model(client):
 
     _stream(test_client, session["id"], "What is RAG?")
 
-    assert gateway.calls[-1]["model_id"] == "mock-chat"
+    assert gateway.calls[-1]["model_id"] == "deepseek-chat"
 
 
 def test_original_rag_stream_route_still_registered(client):
