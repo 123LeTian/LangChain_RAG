@@ -1,4 +1,4 @@
-"""Isolated vector + keyword hybrid retrieval."""
+"""Isolated vector + keyword hybrid retrieval with Chinese trigram support."""
 
 from copy import deepcopy
 from contextvars import ContextVar
@@ -18,8 +18,27 @@ def _metadata_matches(chunk: ChunkRecord, filters: Optional[Dict[str, Any]]) -> 
     return all(chunk.metadata.get(key) == value for key, value in filters.items())
 
 
+def _tokenize_zh(text: str) -> set:
+    """Tokenize Chinese+mixed text into unigrams, bigrams, and trigrams."""
+    tokens = set()
+    raw_words = re.findall(r"[\w]+", text.lower())
+    for word in raw_words:
+        ascii_part = re.findall(r"[a-z0-9]+", word)
+        chinese_part = re.findall(r"[\u4e00-\u9fff]+", word)
+        tokens.update(ascii_part)
+        for seg in chinese_part:
+            n = len(seg)
+            for i in range(n):
+                tokens.add(seg[i])
+                if i < n - 1:
+                    tokens.add(seg[i:i+2])
+                if i < n - 2:
+                    tokens.add(seg[i:i+3])
+    return tokens
+
+
 class KeywordSearcher:
-    """Small deterministic keyword searcher with pre-ranking isolation."""
+    """Chinese-aware keyword searcher with trigram matching + phrase boost."""
 
     def __init__(self):
         self._chunks: List[ChunkRecord] = []
@@ -42,19 +61,42 @@ class KeywordSearcher:
             if filters.get("kb_id", kb_id) != kb_id:
                 raise ValueError("filters cannot override kb_id")
             filters = {key: value for key, value in filters.items() if key != "kb_id"}
-        query_words = set(re.findall(r"\w+", query.lower()))
+
+        query_tokens = _tokenize_zh(query)
+        query_lower = query.lower()
+        # Extract Chinese segments for phrase matching
+        zh_segs = re.findall(r"[\u4e00-\u9fff]+", query)
+
         scored = []
-        # Isolation and filters are applied before scoring and Top-K.
         for chunk in self._chunks:
             if kb_id is not None and chunk.kb_id != kb_id:
                 continue
             if not _metadata_matches(chunk, filters):
                 continue
-            text_words = set(re.findall(r"\w+", chunk.text.lower()))
-            overlap = len(query_words & text_words)
-            if overlap > 0:
-                score = overlap / max(len(query_words), 1)
-                scored.append((score, chunk.id, chunk))
+            text_lower = chunk.text.lower()
+            text_tokens = _tokenize_zh(chunk.text)
+
+            # Token overlap score
+            overlap = len(query_tokens & text_tokens)
+            if overlap == 0 and not any(seg in text_lower for seg in zh_segs):
+                continue
+
+            base_score = overlap / max(len(query_tokens), 1)
+
+            # Phrase boost: exact query substring or long Chinese segment match
+            phrase_boost = 0.0
+            if query_lower in text_lower:
+                phrase_boost = 0.5
+            else:
+                for seg in zh_segs:
+                    if len(seg) >= 3 and seg in text_lower:
+                        phrase_boost = max(phrase_boost, 0.25)
+                    elif len(seg) >= 2 and seg in text_lower:
+                        phrase_boost = max(phrase_boost, 0.12)
+
+            final_score = base_score + phrase_boost
+            scored.append((final_score, chunk.id, chunk))
+
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [
             RetrievalHit(
@@ -76,7 +118,7 @@ class HybridRetrievalError(RuntimeError):
 
 
 class HybridRetriever:
-    """Weighted hybrid retriever with strict B3 search and legacy retrieve."""
+    """Weighted hybrid retriever with Chinese-aware keyword search."""
 
     retriever_name: str = "hybrid"
 
@@ -100,8 +142,6 @@ class HybridRetriever:
 
     @property
     def last_warnings(self) -> List[str]:
-        """Warnings produced by the latest search in the current task context."""
-
         return list(self._warning_context.get())
 
     def add_chunks(self, chunks: List[ChunkRecord]) -> None:
@@ -119,10 +159,7 @@ class HybridRetriever:
         failures = []
         try:
             vec_hits = self.vector_retriever.search(
-                query,
-                kb_id=kb_id,
-                top_k=top_k * 2,
-                filters=filters,
+                query, kb_id=kb_id, top_k=top_k * 2, filters=filters,
             )
         except Exception as exc:
             vec_hits = []
@@ -130,10 +167,7 @@ class HybridRetriever:
             warnings.append(self._branch_warning("vector", exc))
         try:
             kw_hits = self.keyword_searcher.search(
-                query,
-                kb_id=kb_id,
-                top_k=top_k * 2,
-                filters=filters,
+                query, kb_id=kb_id, top_k=top_k * 2, filters=filters,
             )
         except Exception as exc:
             kw_hits = []
@@ -148,14 +182,10 @@ class HybridRetriever:
     def _branch_warning(branch: str, error: Exception) -> str:
         detail = str(error).replace("\n", " ").strip()[:160]
         suffix = f": {detail}" if detail else ""
-        return (
-            f"hybrid {branch} branch degraded "
-            f"({type(error).__name__}){suffix}"
-        )
+        return f"hybrid {branch} branch degraded ({type(error).__name__}){suffix}"
 
     def retrieve(self, query: str, top_k: int = 5) -> List[RetrievalHit]:
-        """Legacy explicit all-KB path retained for existing callers."""
-
+        """Legacy all-KB path."""
         query_vector = self.embedder.embed_query(query)
         vec_hits = self.index.search_all(query_vector, top_k=top_k * 2)
         kw_hits = self.keyword_searcher.search(query, top_k=top_k * 2)
@@ -188,10 +218,7 @@ class HybridRetriever:
                     retriever=self.retriever_name,
                     metadata=deepcopy(hit.metadata),
                 )
-        result = sorted(
-            merged.values(),
-            key=lambda hit: (-hit.score, hit.chunk.id),
-        )[:top_k]
+        result = sorted(merged.values(), key=lambda hit: (-hit.score, hit.chunk.id))[:top_k]
         for rank, hit in enumerate(result, start=rank_start):
             hit.rank = rank
         return result

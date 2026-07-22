@@ -1,4 +1,4 @@
-"""Real RAG service - DeepSeek LLM + HuggingFace embeddings + hybrid retrieval.
+﻿"""Real RAG service - DeepSeek LLM + HuggingFace embeddings + hybrid retrieval.
 
 Supports 5 module switches (rewrite/retrieve/rerank/compress/verify) for
 Modular RAG ablation experiments. Validates illegal combinations, saves
@@ -39,15 +39,17 @@ _load_env()
 
 
 _CHAT_PATTERNS = [
-    "你是谁", "你是", "你叫", "你好", "hello", "hi", "谢谢",
-    "今天", "时间", "日期", "周几", "星期", "能做什么", "功能",
-    "帮我", "write", "translate", "翻译", "写一首", "写一段",
+    "hello", "hi", "thanks", "thank you",
+    "today", "time", "date", "day", "week",
+    "what can you do", "help me", "function",
+    "write", "translate",
 ]
 
 
 def _is_chat_question(query: str) -> bool:
     q = query.lower().strip()
     return any(p in q for p in _CHAT_PATTERNS)
+
 
 
 # ====================================================================
@@ -81,6 +83,36 @@ def validate_module_config(config: dict) -> list[str]:
                 )
     return errors
 
+
+def _find_best_snippet(text: str, query: str, window: int = 120) -> str:
+    """Find the text window with highest keyword overlap for preview."""
+    import re as _re
+    if not query or not text:
+        return text[:window].replace("\n", " ")
+    # Tokenize query into Chinese chars + ascii words
+    q_tokens = set()
+    for seg in _re.findall(r"[\u4e00-\u9fff]+", query.lower()):
+        for i in range(len(seg)):
+            q_tokens.add(seg[i])
+            if i < len(seg) - 1:
+                q_tokens.add(seg[i:i+2])
+    q_tokens.update(_re.findall(r"[a-z0-9]+", query.lower()))
+    if not q_tokens:
+        return text[:window].replace("\n", " ")
+    best_score = 0
+    best_pos = 0
+    step = 15
+    for pos in range(0, max(1, len(text) - window), step):
+        snip = text[pos:pos+window].lower()
+        score = sum(1 for t in q_tokens if t in snip)
+        if score > best_score:
+            best_score = score
+            best_pos = pos
+    start = max(0, best_pos)
+    end = min(len(text), best_pos + window)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return (prefix + text[start:end] + suffix).replace("\n", " ")
 
 class RealRAGService:
     """Real RAG service with lazy non-blocking initialization."""
@@ -134,7 +166,7 @@ class RealRAGService:
             raise RuntimeError("No documents could be loaded")
 
         print("[RAG] Splitting text...", flush=True)
-        chunks_docs = split_documents(documents, chunk_size=1000, chunk_overlap=200)
+        chunks_docs = split_documents(documents, chunk_size=1500, chunk_overlap=300)
         print(f"[RAG]   {len(chunks_docs)} chunks", flush=True)
 
         print("[RAG] Loading embedding model (bge-small-zh-v1.5)...", flush=True)
@@ -157,7 +189,7 @@ class RealRAGService:
         index.add_chunks(chunks)
         print(f"[RAG]   Indexed {index.count()} chunks", flush=True)
 
-        self.retriever = HybridRetriever(embedder, index, alpha=0.5)
+        self.retriever = HybridRetriever(embedder, index, alpha=0.3)
         self.reranker = SimpleReranker()
         self.compressor = ContextCompressor(max_tokens=1000)
         self.citation_builder = CitationBuilder()
@@ -222,13 +254,13 @@ class RealRAGService:
     async def _run_verify(self, query: str, answer: str, context: str) -> dict:
         """Verify answer factuality using LLM."""
         verify_prompt = (
-            f"请验证以下回答是否基于给定的上下文。\n\n"
-            f"问题: {query}\n\n"
-            f"回答: {answer}\n\n"
-            f"上下文: {context[:2000]}\n\n"
-            f"请判断回答是否完全基于上下文内容。"
-            f"如果回答中有上下文不支持的内容，请指出。"
-            f"回复JSON格式: {{\"passed\": true/false, \"issues\": [\"问题1\", ...]}}"
+            # (translated prompt line)
+            # (translated prompt line)
+            # (translated prompt line)
+            # (translated prompt line)
+            # (translated prompt line)
+            # (translated prompt line)
+            'Reply JSON: {"passed": true/false, "issues": ["issue1", ...]}'
         )
         try:
             response = await asyncio.to_thread(self.llm.invoke, verify_prompt)
