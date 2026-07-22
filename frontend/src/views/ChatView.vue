@@ -64,6 +64,9 @@
                     执行轨迹
                     <small>{{ totalDuration(msg.trace) }}ms · {{ msg.trace.length }} 阶段</small>
                   </button>
+                  <span v-if="messageTokenTotal(msg)" class="message-token-chip">
+                    🪙 {{ messageTokenLabel(msg) }}
+                  </span>
                 </div>
 
                 <div class="quick-actions">
@@ -196,17 +199,6 @@
           </div>
 
           <div class="toolbar-right">
-            <span class="token-chip">Tokens: {{ currentTokenLabel }}</span>
-            <button
-              class="control-pill export-pill"
-              type="button"
-              :disabled="!props.currentSessionId"
-              title="导出 Markdown"
-              @click="downloadMarkdown"
-            >
-              <span>⬇</span>
-              <strong>Markdown</strong>
-            </button>
             <div class="popover-control kb-control">
               <button class="control-pill kb-pill" type="button" @click="toggleMenu('kb')">
                 <span>📚 知识库</span>
@@ -297,9 +289,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
   chatSessionStream,
   createChatSession,
-  exportChatSession,
   getChatSession,
-  getChatSessionStats,
   listChatModels,
   listChatMessages,
   listChatPresets,
@@ -367,7 +357,6 @@ const activeStreamSessionId = ref('')
 const modelOptions = ref([])
 const defaultModelId = ref('deepseek-chat')
 const defaultPresetId = ref('default-assistant')
-const currentStats = ref(null)
 
 let abortCtrl = null
 
@@ -396,7 +385,6 @@ async function loadSession(sessionId) {
     messages.value = []
     activeMessage.value = null
     drawerOpen.value = false
-    currentStats.value = null
     return
   }
 
@@ -421,7 +409,6 @@ async function loadSession(sessionId) {
       activeMessage.value = messages.value.find(message => message.id === activeMessage.value?.id) || null
     }
     await scrollToBottom()
-    await loadSessionStats(sessionId)
   } catch (err) {
     errorText.value = err?.message || '加载历史失败'
   }
@@ -521,7 +508,6 @@ async function sendQuery() {
         assistantMessage.summaryOpen = false
         streaming.value = false
         emit('sessions-updated')
-        loadSessionStats(sessionId)
       } else if (event.type === 'error') {
         const requestHint = event.request_id ? `（request_id: ${event.request_id}）` : ''
         errorText.value = `${event.message || '请求失败'}${requestHint}`
@@ -654,8 +640,6 @@ const currentKbLabel = computed(() =>
   kbOptions.value.find(item => item.value === props.chatSettings.kbId)?.label || '不使用知识库'
 )
 
-const currentTokenLabel = computed(() => formatTokenCount(currentStats.value?.total_tokens || 0))
-
 function toggleMenu(name) {
   advancedOpen.value = false
   openMenu.value = openMenu.value === name ? '' : name
@@ -725,18 +709,6 @@ function chooseKnowledgeBase(value) {
   persistSessionConfig()
 }
 
-async function loadSessionStats(sessionId) {
-  if (!sessionId) {
-    currentStats.value = null
-    return
-  }
-  try {
-    currentStats.value = await getChatSessionStats(sessionId)
-  } catch {
-    currentStats.value = null
-  }
-}
-
 function formatTokenCount(value) {
   const count = Number(value || 0)
   if (count >= 1000000) return `${(count / 1000000).toFixed(1)}m`
@@ -744,22 +716,19 @@ function formatTokenCount(value) {
   return String(count)
 }
 
-async function downloadMarkdown() {
-  if (!props.currentSessionId) return
-  try {
-    const data = await exportChatSession(props.currentSessionId)
-    const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = data.filename || 'chat-session.md'
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    URL.revokeObjectURL(url)
-  } catch (err) {
-    errorText.value = err?.message || '导出失败'
+function messageTokenTotal(message) {
+  return Number(message?.prompt_tokens || 0) + Number(message?.completion_tokens || 0)
+}
+
+function messageTokenLabel(message) {
+  const prompt = Number(message?.prompt_tokens || 0)
+  const completion = Number(message?.completion_tokens || 0)
+  const total = prompt + completion
+  if (!total) return ''
+  if (prompt || completion) {
+    return `Tokens: ${formatTokenCount(total)} (In: ${formatTokenCount(prompt)} / Out: ${formatTokenCount(completion)})`
   }
+  return `${formatTokenCount(total)} Tokens`
 }
 
 async function scrollToBottom() {
@@ -857,7 +826,6 @@ watch(() => props.newChatSignal, () => {
   advancedOpen.value = false
   openMenu.value = ''
   errorText.value = ''
-  currentStats.value = null
   if (!props.currentSessionId) {
     messages.value = []
   }
@@ -1225,25 +1193,6 @@ watch(() => props.newChatSignal, () => {
   font-size: 12px;
   font-weight: 750;
   white-space: nowrap;
-}
-
-.token-chip {
-  display: inline-flex;
-  min-height: 32px;
-  align-items: center;
-  border: 1px solid var(--border-color);
-  border-radius: 999px;
-  background: rgba(248, 250, 252, 0.82);
-  padding: 0 10px;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 750;
-  white-space: nowrap;
-}
-
-.export-pill:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
 }
 
 .rag-cluster .control-pill {
@@ -1734,6 +1683,22 @@ watch(() => props.newChatSignal, () => {
 .trace-action small {
   color: #d97706;
   font-size: 10px;
+}
+
+.message-token-chip {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid rgba(251, 191, 36, 0.6);
+  border-radius: 6px;
+  background: #fffbeb;
+  padding: 2px 8px;
+  color: #b45309;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .quick-actions button {

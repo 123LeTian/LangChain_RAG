@@ -64,6 +64,7 @@
                 <small>{{ formatSessionTime(session.updated_at) }}</small>
               </button>
               <div class="history-actions">
+                <button type="button" title="导出为 Markdown" @click.stop="downloadSessionMarkdown(session)">📥</button>
                 <button type="button" title="重命名" @click.stop="startRename(session)">✎</button>
                 <button type="button" title="删除" @click.stop="removeSession(session.id)">×</button>
               </div>
@@ -361,6 +362,7 @@ import {
   deleteChatSession,
   deleteChatModel,
   deleteChatPreset,
+  exportChatSession,
   listChatModels,
   listChatPresets,
   listChatSessions,
@@ -596,6 +598,25 @@ function selectSession(sessionId) {
   currentSessionId.value = sessionId
   applySessionSettings(chatSessions.value.find(session => session.id === sessionId))
   router.push('/chat')
+}
+
+async function downloadSessionMarkdown(session) {
+  if (!session?.id) return
+  try {
+    sessionLoadError.value = ''
+    const data = await exportChatSession(session.id)
+    const blob = new Blob([data.content], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = data.filename || `${session.title || 'chat-session'}.md`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    sessionLoadError.value = err?.message || '导出失败'
+  }
 }
 
 async function openConfigModal(name) {

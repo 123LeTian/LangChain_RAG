@@ -396,8 +396,7 @@ a {
   transition: opacity 0.14s ease;
 }
 
-.history-item:hover .history-actions,
-.history-item.active .history-actions {
+.history-item:hover .history-actions {
   opacity: 1;
 }
 
@@ -415,6 +414,10 @@ a {
 .history-actions button:hover {
   background: var(--bg-secondary);
   color: var(--text-primary);
+}
+
+.history-actions button:last-child:hover {
+  color: #ef4444;
 }
 
 .history-edit {
