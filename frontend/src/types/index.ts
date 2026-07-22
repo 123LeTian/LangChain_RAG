@@ -74,7 +74,7 @@ export interface TraceEvent {
 
 export type KBStatus = 'creating' | 'ready' | 'indexing' | 'error'
 export type DocStatus = 'uploaded' | 'parsing' | 'chunking' | 'indexed' | 'error'
-export type DocType = 'txt' | 'md' | 'pdf' | 'docx'
+export type DocType = 'txt' | 'md' | 'markdown' | 'pdf' | 'docx'
 
 export interface KnowledgeBase {
   id: string
@@ -97,6 +97,17 @@ export interface DocumentRecord {
   status: DocStatus
   chunk_count: number
   size_bytes: number
+}
+
+export interface DocumentPreview {
+  id: string
+  kb_id: string
+  filename: string
+  type: DocType
+  size_bytes: number
+  text: string
+  truncated: boolean
+  metadata: Record<string, any>
 }
 
 // ========== 图谱 ==========

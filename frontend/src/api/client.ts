@@ -7,6 +7,7 @@ import type {
   RAGResult,
   KnowledgeBase,
   DocumentRecord,
+  DocumentPreview,
   GraphData,
   EvaluationResult,
   TraceEvent,
@@ -72,12 +73,19 @@ export async function uploadDocument(kbId: string, file: File): Promise<Document
   const form = new FormData()
   form.append('file', file)
   const res = await fetch(`${BASE}/api/knowledge-bases/${kbId}/documents`, { method: 'POST', body: form })
-  if (!res.ok) throw new Error('upload failed')
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body?.error?.message || body?.detail || `上传失败: ${res.status}`)
+  }
   return res.json()
 }
 
 export async function listDocuments(kbId: string): Promise<DocumentRecord[]> {
   return request(`/api/knowledge-bases/${kbId}/documents`)
+}
+
+export async function previewDocument(kbId: string, docId: string): Promise<DocumentPreview> {
+  return request(`/api/knowledge-bases/${kbId}/documents/${docId}/preview`)
 }
 
 export async function deleteDocument(kbId: string, docId: string): Promise<void> {
