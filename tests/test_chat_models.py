@@ -30,7 +30,7 @@ def client(tmp_path):
     session_service = SessionService(store)
     message_service = MessageService(store)
     memory_service = MemoryService(message_service)
-    registry = ModelRegistry()
+    registry = ModelRegistry(custom_path=tmp_path / "custom_models.json")
     app_service = ChatApplicationService(
         session_service,
         message_service,
@@ -72,12 +72,100 @@ def test_list_chat_models_does_not_expose_api_keys(client):
     assert "OPENAI_API_KEY" not in payload
 
 
+def test_model_management_does_not_expose_api_key_env(client, monkeypatch):
+    monkeypatch.setenv("CUSTOM_MODEL_KEY", "secret-value")
+    response = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "openai",
+            "display_name": "Custom OpenAI",
+            "model_name": "custom-openai",
+            "base_url": "https://example.invalid/v1",
+            "api_key_env": "CUSTOM_MODEL_KEY",
+        },
+    )
+
+    assert response.status_code == 201
+    payload = client.get("/api/chat/models/manage").text
+    assert "secret-value" not in payload
+    assert "CUSTOM_MODEL_KEY" not in payload
+    assert "api_key" not in payload.lower()
+    assert "key_configured" in payload
+
+
 def test_list_chat_models_has_one_default_model(client):
     response = client.get("/api/chat/models")
 
     defaults = [model for model in response.json()["models"] if model["is_default"]]
     assert len(defaults) == 1
     assert defaults[0]["id"] == "deepseek-chat"
+
+
+def test_custom_model_crud_and_default_model(client):
+    created = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "ollama",
+            "display_name": "Ollama Qwen",
+            "model_name": "custom-qwen-local",
+            "base_url": "http://localhost:11434/v1",
+        },
+    )
+    assert created.status_code == 201
+    model_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/chat/models/{model_id}",
+        json={"display_name": "Ollama Qwen Local"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["display_name"] == "Ollama Qwen Local"
+
+    default_response = client.patch(
+        "/api/chat/models/default",
+        json={"model_id": model_id},
+    )
+    assert default_response.status_code == 200
+    assert default_response.json()["id"] == model_id
+    assert client.get("/api/chat/models").json()["default_model_id"] == model_id
+
+    delete_response = client.delete(f"/api/chat/models/{model_id}")
+    assert delete_response.status_code == 204
+    ids = [model["id"] for model in client.get("/api/chat/models/manage").json()["models"]]
+    assert model_id not in ids
+
+
+def test_builtin_model_is_read_only(client):
+    response = client.delete("/api/chat/models/deepseek-chat")
+
+    assert response.status_code == 422
+
+
+def test_model_connection_reports_missing_key(client, monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    response = client.post("/api/chat/models/deepseek-chat/test")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert "缺少" in data["message"]
+
+
+def test_local_model_connection_does_not_require_key(client):
+    created = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "ollama",
+            "display_name": "Local Model",
+            "model_name": "local-model",
+            "base_url": "http://localhost:11434/v1",
+        },
+    ).json()
+
+    response = client.post(f"/api/chat/models/{created['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
 
 def test_update_session_model(client):

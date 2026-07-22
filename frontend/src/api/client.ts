@@ -17,6 +17,9 @@ import type {
   ChatMessage,
   ChatStreamEvent,
   ChatStreamRequest,
+  ChatModel,
+  ChatModelConnectionResult,
+  ChatModelPayload,
   ChatModelsResponse,
   ChatPreset,
   ChatPresetsResponse,
@@ -214,6 +217,43 @@ export async function listChatMessages(sessionId: string): Promise<ChatMessage[]
 
 export async function listChatModels(): Promise<ChatModelsResponse> {
   return request('/api/chat/models')
+}
+
+export async function manageChatModels(): Promise<ChatModelsResponse> {
+  return request('/api/chat/models/manage')
+}
+
+export async function createChatModel(payload: ChatModelPayload): Promise<ChatModel> {
+  return request('/api/chat/models', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateChatModel(modelId: string, payload: Partial<ChatModelPayload>): Promise<ChatModel> {
+  return request(`/api/chat/models/${modelId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteChatModel(modelId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/chat/models/${modelId}`, { method: 'DELETE' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body?.error?.message || `删除模型失败: ${res.status}`)
+  }
+}
+
+export async function setDefaultChatModel(modelId: string): Promise<ChatModel> {
+  return request('/api/chat/models/default', {
+    method: 'PATCH',
+    body: JSON.stringify({ model_id: modelId }),
+  })
+}
+
+export async function testChatModelConnection(modelId: string): Promise<ChatModelConnectionResult> {
+  return request(`/api/chat/models/${modelId}/test`, { method: 'POST' })
 }
 
 export async function updateChatSessionModel(sessionId: string, modelId: string): Promise<ChatSession> {

@@ -269,16 +269,47 @@ export interface ChatModel {
   provider: string
   display_name: string
   model_name: string
+  base_url?: string | null
+  description?: string
   supports_stream: boolean
   supports_tools: boolean
   supports_vision: boolean
   enabled: boolean
   is_default: boolean
+  is_builtin: boolean
+  key_required: boolean
+  key_configured: boolean
+  key_scope: 'independent' | 'not_required'
 }
 
 export interface ChatModelsResponse {
   models: ChatModel[]
   default_model_id: string
+  key_metrics?: {
+    configured: number
+    required: number
+    missing: number
+    independent: number
+  }
+}
+
+export interface ChatModelPayload {
+  provider: string
+  display_name: string
+  model_name: string
+  base_url?: string | null
+  api_key_env?: string | null
+  description?: string
+  supports_stream?: boolean
+  supports_tools?: boolean
+  supports_vision?: boolean
+  enabled?: boolean
+}
+
+export interface ChatModelConnectionResult {
+  ok: boolean
+  message: string
+  model_id: string
 }
 
 export type ChatStreamEvent =

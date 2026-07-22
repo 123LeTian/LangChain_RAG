@@ -33,118 +33,68 @@
             <span>🔍</span>
             <span>搜索历史对话...</span>
           </div>
+          <kbd>Ctrl+K</kbd>
         </button>
-        <div v-if="sessionLoadError" class="history-empty">{{ sessionLoadError }}</div>
-        <div v-else-if="!chatSessions.length" class="history-empty">暂无历史</div>
-        <article
-          v-for="session in chatSessions"
-          :key="session.id"
-          :class="['history-item', { active: session.id === currentSessionId }]"
-        >
-          <form
-            v-if="editingSessionId === session.id"
-            class="history-edit"
-            @submit.prevent="saveSessionTitle(session.id)"
+
+        <div class="history-scroll">
+          <div v-if="sessionLoadError" class="history-empty">{{ sessionLoadError }}</div>
+          <div v-else-if="!chatSessions.length" class="history-empty">暂无历史</div>
+          <article
+            v-for="session in chatSessions"
+            :key="session.id"
+            :class="['history-item', { active: session.id === currentSessionId }]"
           >
-            <input
-              v-model="editingTitle"
-              type="text"
-              aria-label="会话标题"
-              @keydown.esc.prevent="cancelRename"
-            />
-            <button type="submit" title="保存">✓</button>
-            <button type="button" title="取消" @click="cancelRename">×</button>
-          </form>
-          <template v-else>
-            <button class="history-select" type="button" @click="selectSession(session.id)">
-              <span>{{ session.title }}</span>
-              <small>{{ formatSessionTime(session.updated_at) }}</small>
-            </button>
-            <div class="history-actions">
-              <button type="button" title="重命名" @click.stop="startRename(session)">✎</button>
-              <button type="button" title="删除" @click.stop="removeSession(session.id)">×</button>
-            </div>
-          </template>
-        </article>
+            <form
+              v-if="editingSessionId === session.id"
+              class="history-edit"
+              @submit.prevent="saveSessionTitle(session.id)"
+            >
+              <input
+                v-model="editingTitle"
+                type="text"
+                aria-label="会话标题"
+                @keydown.esc.prevent="cancelRename"
+              />
+              <button type="submit" title="保存">✓</button>
+              <button type="button" title="取消" @click="cancelRename">×</button>
+            </form>
+            <template v-else>
+              <button class="history-select" type="button" @click="selectSession(session.id)">
+                <span>{{ session.title }}</span>
+                <small>{{ formatSessionTime(session.updated_at) }}</small>
+              </button>
+              <div class="history-actions">
+                <button type="button" title="重命名" @click.stop="startRename(session)">✎</button>
+                <button type="button" title="删除" @click.stop="removeSession(session.id)">×</button>
+              </div>
+            </template>
+          </article>
+        </div>
       </section>
 
       <section class="sidebar-config-dock" aria-label="会话快捷配置">
-        <div class="sidebar-config-control">
+        <div class="sidebar-config-bar">
           <button
-            :class="['sidebar-config-button', { active: activeSidebarConfig === 'model' }]"
+            class="sidebar-config-pill"
             type="button"
-            @click="toggleSidebarConfig('model')"
+            title="点击配置模型"
+            @click="openConfigModal('model')"
           >
-            <span class="config-icon">◎</span>
-            <span>
-              <strong>模型配置</strong>
-              <small>{{ currentModelLabel }}</small>
-            </span>
+            <span>🤖</span>
+            <strong>模型配置</strong>
           </button>
-          <div v-if="activeSidebarConfig === 'model'" class="sidebar-config-panel">
-            <button
-              v-for="model in sidebarModelOptions"
-              :key="model.value"
-              :class="['sidebar-option', { selected: chatSettings.modelId === model.value }]"
-              type="button"
-              @click="chooseSidebarModel(model.value)"
-            >
-              <span>
-                <strong>{{ model.label }}</strong>
-                <small>{{ model.provider }}</small>
-              </span>
-              <b v-if="chatSettings.modelId === model.value">✓</b>
-            </button>
-          </div>
-        </div>
 
-        <div class="sidebar-config-control">
           <button
-            :class="['sidebar-config-button', { active: activeSidebarConfig === 'session' }]"
+            class="sidebar-config-pill"
             type="button"
-            @click="toggleSidebarConfig('session')"
+            title="点击配置预设"
+            @click="openConfigModal('preset')"
           >
-            <span class="config-icon">⚙</span>
-            <span>
-              <strong>会话配置</strong>
-              <small>{{ currentSessionConfigLabel }}</small>
-            </span>
+            <span>🎭</span>
+            <strong>提示词预设</strong>
           </button>
-          <div v-if="activeSidebarConfig === 'session'" class="sidebar-config-panel">
-            <div class="sidebar-option-group">
-              <span>RAG 模式</span>
-              <button
-                v-for="mode in ragModeOptions"
-                :key="mode.value"
-                :class="['sidebar-option', { selected: chatSettings.mode === mode.value }]"
-                type="button"
-                @click="chooseSidebarRagMode(mode.value)"
-              >
-                <span>{{ mode.label }}</span>
-                <b v-if="chatSettings.mode === mode.value">✓</b>
-              </button>
-            </div>
-            <div class="sidebar-option-group">
-              <span>知识库</span>
-              <button
-                v-for="kb in sidebarKnowledgeBaseOptions"
-                :key="kb.value"
-                :class="['sidebar-option', { selected: chatSettings.kbId === kb.value }]"
-                type="button"
-                @click="chooseSidebarKnowledgeBase(kb.value)"
-              >
-                <span>{{ kb.label }}</span>
-                <b v-if="chatSettings.kbId === kb.value">✓</b>
-              </button>
-            </div>
-          </div>
         </div>
       </section>
-
-      <div class="sidebar-status">
-        <span class="status-dot" :class="healthStatus" />
-        <span>{{ healthText }}</span>
-      </div>
     </aside>
 
     <main class="app-canvas">
@@ -214,6 +164,190 @@
         </section>
       </div>
     </teleport>
+
+    <teleport to="body">
+      <div
+        v-if="configModalOpen"
+        class="config-page-backdrop"
+        role="presentation"
+        @mousedown.self="closeConfigModal"
+      >
+        <section class="config-page" role="dialog" aria-modal="true">
+          <header class="config-page-header">
+            <button class="config-back-button" type="button" @click="closeConfigModal">← 返回对话</button>
+            <div class="config-page-title">
+              <strong>{{ configModalOpen === 'model' ? '模型配置' : '提示词预设' }}</strong>
+              <span>
+                {{ configModalOpen === 'model'
+                  ? '模型列表、自定义模型、默认模型、连接测试和密钥状态'
+                  : '内置预设、个人预设 CRUD 和当前会话预设选择' }}
+              </span>
+            </div>
+            <button class="config-primary-button" type="button" @click="openItemDialog(configModalOpen)">
+              {{ configModalOpen === 'model' ? '+ 添加模型' : '+ 新建预设' }}
+            </button>
+          </header>
+
+          <div v-if="configMessage" class="config-message">{{ configMessage }}</div>
+
+          <div v-if="configModalOpen === 'model'" class="config-card-grid">
+            <article
+              v-for="model in managedModels"
+              :key="model.id"
+              class="config-card"
+            >
+              <header>
+                <div>
+                  <strong>{{ model.display_name }}</strong>
+                  <small>{{ model.provider }} · {{ model.model_name }}</small>
+                </div>
+                <span>{{ model.is_default ? '默认' : model.is_builtin ? '内置·只读' : '自定义' }}</span>
+              </header>
+              <p>{{ model.description || model.base_url || 'OpenAI-compatible chat completion model.' }}</p>
+              <div class="config-card-meta">
+                <span>{{ model.enabled ? '已启用' : '已停用' }}</span>
+                <span>{{ model.key_required ? (model.key_configured ? '密钥已配置' : '缺少密钥') : '无需密钥' }}</span>
+                <span>{{ model.supports_stream ? '流式' : '非流式' }}</span>
+              </div>
+              <footer>
+                <div>
+                  <button type="button" @click="testManagedModel(model.id)">测试连接</button>
+                  <button type="button" @click="chooseManagedModel(model.id)">用于当前</button>
+                  <button type="button" @click="setDefaultModel(model.id)">设默认</button>
+                  <button v-if="!model.is_builtin" type="button" @click="editModelDraft(model)">编辑</button>
+                </div>
+                <button
+                  v-if="!model.is_builtin"
+                  class="text-danger"
+                  type="button"
+                  @click="removeManagedModel(model.id)"
+                >
+                  删除
+                </button>
+              </footer>
+            </article>
+          </div>
+
+          <div v-else class="config-card-grid">
+            <article
+              v-for="preset in managedPresets"
+              :key="preset.id"
+              class="config-card"
+            >
+              <header>
+                <div>
+                  <strong>{{ preset.name }}</strong>
+                  <small>{{ preset.owner_type === 'system' ? '内置预设' : '个人预设' }}</small>
+                </div>
+                <span>{{ preset.id === chatSettings.presetId ? '当前' : preset.owner_type === 'system' ? '内置·只读' : '自定义' }}</span>
+              </header>
+              <p>{{ preset.description || preset.system_prompt || '内置提示词预设，完整提示词保持隐藏。' }}</p>
+              <div class="config-card-meta">
+                <span>{{ preset.owner_type === 'system' ? '只读' : '可编辑' }}</span>
+                <span>{{ preset.is_default ? '默认' : '可选' }}</span>
+              </div>
+              <footer>
+                <div>
+                  <button type="button" @click="chooseManagedPreset(preset.id)">用于当前</button>
+                  <button v-if="preset.owner_type === 'user'" type="button" @click="editPresetDraft(preset)">编辑</button>
+                </div>
+                <button
+                  v-if="preset.owner_type === 'user'"
+                  class="text-danger"
+                  type="button"
+                  @click="removeManagedPreset(preset.id)"
+                >
+                  删除
+                </button>
+              </footer>
+            </article>
+          </div>
+        </section>
+      </div>
+    </teleport>
+
+    <teleport to="body">
+      <div
+        v-if="itemDialogOpen"
+        class="item-dialog-backdrop"
+        role="presentation"
+        @mousedown.self="closeItemDialog"
+      >
+        <form
+          v-if="itemDialogOpen === 'model'"
+          class="item-dialog"
+          role="dialog"
+          aria-modal="true"
+          @submit.prevent="saveModelDraft"
+        >
+          <header>
+            <strong>{{ editingModelId ? '编辑模型' : '添加模型' }}</strong>
+            <button type="button" aria-label="关闭" @click="closeItemDialog">×</button>
+          </header>
+          <label>
+            <span>名称</span>
+            <input v-model="modelDraft.display_name" type="text" placeholder="DeepSeek Pro" />
+          </label>
+          <label>
+            <span>描述</span>
+            <input v-model="modelDraft.description" type="text" placeholder="用途或备注" />
+          </label>
+          <label>
+            <span>Provider</span>
+            <input v-model="modelDraft.provider" type="text" placeholder="deepseek / openai / ollama" />
+          </label>
+          <label>
+            <span>模型名</span>
+            <input v-model="modelDraft.model_name" type="text" placeholder="deepseek-chat" />
+          </label>
+          <label>
+            <span>Base URL</span>
+            <input v-model="modelDraft.base_url" type="text" placeholder="https://api.example.com/v1" />
+          </label>
+          <label>
+            <span>独立密钥环境变量</span>
+            <input v-model="modelDraft.api_key_env" type="text" placeholder="MY_MODEL_API_KEY" />
+          </label>
+          <div class="item-dialog-checks">
+            <label><input v-model="modelDraft.enabled" type="checkbox" /> 启用</label>
+            <label><input v-model="modelDraft.supports_stream" type="checkbox" /> 流式</label>
+            <label><input v-model="modelDraft.supports_tools" type="checkbox" /> Tools</label>
+            <label><input v-model="modelDraft.supports_vision" type="checkbox" /> Vision</label>
+          </div>
+          <button class="item-dialog-save" type="submit">保存</button>
+        </form>
+
+        <form
+          v-else
+          class="item-dialog"
+          role="dialog"
+          aria-modal="true"
+          @submit.prevent="savePresetDraft"
+        >
+          <header>
+            <strong>{{ editingPresetId ? '编辑预设' : '新建预设' }}</strong>
+            <button type="button" aria-label="关闭" @click="closeItemDialog">×</button>
+          </header>
+          <label>
+            <span>名称</span>
+            <input v-model="presetDraft.name" type="text" placeholder="代码审查助手" />
+          </label>
+          <label>
+            <span>描述</span>
+            <input v-model="presetDraft.description" type="text" placeholder="用于解释、审查或写作" />
+          </label>
+          <label>
+            <span>System Prompt</span>
+            <textarea v-model="presetDraft.system_prompt" rows="5" placeholder="你是一名..." />
+          </label>
+          <label>
+            <span>RAG Prompt Hint</span>
+            <textarea v-model="presetDraft.rag_prompt_hint" rows="3" placeholder="回答时优先..." />
+          </label>
+          <button class="item-dialog-save" type="submit">保存</button>
+        </form>
+      </div>
+    </teleport>
   </div>
 </template>
 
@@ -222,20 +356,28 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { RouterLink, RouterView, useRouter } from 'vue-router'
 import {
   createChatSession,
+  createChatModel,
+  createChatPreset,
   deleteChatSession,
-  healthCheck,
+  deleteChatModel,
+  deleteChatPreset,
   listChatModels,
+  listChatPresets,
   listChatSessions,
   listKnowledgeBases,
+  manageChatModels,
   searchChatMessages,
+  setDefaultChatModel,
+  testChatModelConnection,
+  updateChatModel,
+  updateChatPreset,
   updateChatSession,
   updateChatSessionModel,
+  updateChatSessionPreset,
 } from './api/client'
 
 const router = useRouter()
 const sidebarCollapsed = ref(false)
-const healthStatus = ref('checking')
-const healthText = ref('连接中...')
 const knowledgeBases = ref([])
 const newChatSignal = ref(0)
 const chatSessions = ref([])
@@ -249,14 +391,47 @@ const historySearchLoading = ref(false)
 const searchModalOpen = ref(false)
 const searchInputRef = ref(null)
 const selectedSearchIndex = ref(0)
-const activeSidebarConfig = ref('')
 const sidebarModelOptions = ref([])
 const defaultModelId = ref('deepseek-chat')
+const configModalOpen = ref('')
+const configMessage = ref('')
+const itemDialogOpen = ref('')
+const managedModels = ref([])
+const modelKeyMetrics = ref({ configured: 0, required: 0, missing: 0, independent: 0 })
+const selectedManagedModelId = ref('')
+const editingModelId = ref('')
+const managedPresets = ref([])
+const defaultPresetId = ref('default-assistant')
+const selectedManagedPresetId = ref('')
+const editingPresetId = ref('')
 let historySearchTimer = null
+
+const emptyModelDraft = () => ({
+  provider: 'openai',
+  display_name: '',
+  model_name: '',
+  base_url: '',
+  api_key_env: '',
+  description: '',
+  supports_stream: true,
+  supports_tools: false,
+  supports_vision: false,
+  enabled: true,
+})
+
+const emptyPresetDraft = () => ({
+  name: '',
+  description: '',
+  system_prompt: '',
+  rag_prompt_hint: '',
+})
+
+const modelDraft = reactive(emptyModelDraft())
+const presetDraft = reactive(emptyPresetDraft())
 
 const chatSettings = reactive({
   modelId: 'deepseek-chat',
-  presetId: '',
+  presetId: 'default-assistant',
   mode: 'naive',
   kbId: '',
   topK: 5,
@@ -294,6 +469,10 @@ const currentModelLabel = computed(() =>
   sidebarModelOptions.value.find(model => model.value === chatSettings.modelId)?.label || 'DeepSeek Chat'
 )
 
+const currentPresetLabel = computed(() =>
+  managedPresets.value.find(preset => preset.id === chatSettings.presetId)?.name || '默认预设'
+)
+
 const currentRagModeLabel = computed(() =>
   ragModeOptions.find(mode => mode.value === chatSettings.mode)?.label || 'Naive RAG'
 )
@@ -304,6 +483,14 @@ const currentKnowledgeBaseLabel = computed(() =>
 
 const currentSessionConfigLabel = computed(() =>
   `${currentRagModeLabel.value} · ${currentKnowledgeBaseLabel.value}`
+)
+
+const selectedManagedModel = computed(() =>
+  managedModels.value.find(model => model.id === selectedManagedModelId.value) || null
+)
+
+const selectedManagedPreset = computed(() =>
+  managedPresets.value.find(preset => preset.id === selectedManagedPresetId.value) || null
 )
 
 function applySessionSettings(session) {
@@ -331,6 +518,29 @@ async function loadSidebarModels() {
   } catch {
     sidebarModelOptions.value = [{ value: 'deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek' }]
     defaultModelId.value = 'deepseek-chat'
+  }
+}
+
+async function loadModelManagement() {
+  const data = await manageChatModels()
+  managedModels.value = data.models
+  modelKeyMetrics.value = data.key_metrics || { configured: 0, required: 0, missing: 0, independent: 0 }
+  defaultModelId.value = data.default_model_id || defaultModelId.value
+  if (!selectedManagedModelId.value || !managedModels.value.some(model => model.id === selectedManagedModelId.value)) {
+    selectedManagedModelId.value = chatSettings.modelId || data.default_model_id || managedModels.value[0]?.id || ''
+  }
+  sidebarModelOptions.value = data.models
+    .filter(model => model.enabled)
+    .map(model => ({ value: model.id, label: model.display_name, provider: model.provider }))
+}
+
+async function loadPresetManagement() {
+  const data = await listChatPresets()
+  managedPresets.value = data.presets
+  defaultPresetId.value = data.default_preset_id || managedPresets.value[0]?.id || 'default-assistant'
+  if (!chatSettings.presetId) chatSettings.presetId = defaultPresetId.value
+  if (!selectedManagedPresetId.value || !managedPresets.value.some(preset => preset.id === selectedManagedPresetId.value)) {
+    selectedManagedPresetId.value = chatSettings.presetId || defaultPresetId.value || managedPresets.value[0]?.id || ''
   }
 }
 
@@ -388,8 +598,39 @@ function selectSession(sessionId) {
   router.push('/chat')
 }
 
-function toggleSidebarConfig(name) {
-  activeSidebarConfig.value = activeSidebarConfig.value === name ? '' : name
+async function openConfigModal(name) {
+  configModalOpen.value = name
+  configMessage.value = ''
+  try {
+    if (name === 'model') {
+      await loadModelManagement()
+    } else {
+      await loadPresetManagement()
+    }
+  } catch (err) {
+    configMessage.value = err?.message || '配置加载失败'
+  }
+}
+
+function closeConfigModal() {
+  configModalOpen.value = ''
+  configMessage.value = ''
+  closeItemDialog()
+}
+
+function openItemDialog(name) {
+  configMessage.value = ''
+  if (name === 'model') {
+    resetModelDraft()
+    itemDialogOpen.value = 'model'
+  } else {
+    resetPresetDraft()
+    itemDialogOpen.value = 'preset'
+  }
+}
+
+function closeItemDialog() {
+  itemDialogOpen.value = ''
 }
 
 async function ensureSidebarSession() {
@@ -409,6 +650,98 @@ async function chooseSidebarModel(modelId) {
   } catch (err) {
     chatSettings.modelId = previous
     sessionLoadError.value = err?.message || '模型切换失败'
+  }
+}
+
+async function chooseManagedModel(modelId) {
+  await chooseSidebarModel(modelId)
+  selectedManagedModelId.value = modelId
+  configMessage.value = '已用于当前会话'
+  await loadModelManagement()
+}
+
+async function setDefaultModel(modelId) {
+  try {
+    const model = await setDefaultChatModel(modelId)
+    defaultModelId.value = model.id
+    configMessage.value = '默认模型已更新'
+    await loadModelManagement()
+    await loadSidebarModels()
+  } catch (err) {
+    configMessage.value = err?.message || '默认模型更新失败'
+  }
+}
+
+async function testManagedModel(modelId) {
+  try {
+    const result = await testChatModelConnection(modelId)
+    configMessage.value = result.message
+  } catch (err) {
+    configMessage.value = err?.message || '连接测试失败'
+  }
+}
+
+function resetModelDraft() {
+  Object.assign(modelDraft, emptyModelDraft())
+  editingModelId.value = ''
+}
+
+function editModelDraft(model) {
+  editingModelId.value = model.id
+  itemDialogOpen.value = 'model'
+  Object.assign(modelDraft, {
+    provider: model.provider || 'openai',
+    display_name: model.display_name || '',
+    model_name: model.model_name || '',
+    base_url: model.base_url || '',
+    api_key_env: '',
+    description: model.description || '',
+    supports_stream: Boolean(model.supports_stream),
+    supports_tools: Boolean(model.supports_tools),
+    supports_vision: Boolean(model.supports_vision),
+    enabled: Boolean(model.enabled),
+  })
+}
+
+async function saveModelDraft() {
+  const payload = {
+    provider: modelDraft.provider,
+    display_name: modelDraft.display_name,
+    model_name: modelDraft.model_name,
+    base_url: modelDraft.base_url || null,
+    description: modelDraft.description || '',
+    supports_stream: modelDraft.supports_stream,
+    supports_tools: modelDraft.supports_tools,
+    supports_vision: modelDraft.supports_vision,
+    enabled: modelDraft.enabled,
+  }
+  if (!editingModelId.value || modelDraft.api_key_env) {
+    payload.api_key_env = modelDraft.api_key_env || null
+  }
+  try {
+    const model = editingModelId.value
+      ? await updateChatModel(editingModelId.value, payload)
+      : await createChatModel(payload)
+    selectedManagedModelId.value = model.id
+    configMessage.value = editingModelId.value ? '模型已保存' : '模型已新增'
+    resetModelDraft()
+    closeItemDialog()
+    await loadModelManagement()
+    await loadSidebarModels()
+  } catch (err) {
+    configMessage.value = err?.message || '模型保存失败'
+  }
+}
+
+async function removeManagedModel(modelId) {
+  try {
+    await deleteChatModel(modelId)
+    if (selectedManagedModelId.value === modelId) selectedManagedModelId.value = ''
+    configMessage.value = '模型已删除'
+    await loadModelManagement()
+    await loadSidebarModels()
+  } catch (err) {
+    configMessage.value = err?.message || '模型删除失败'
   }
 }
 
@@ -433,6 +766,72 @@ function chooseSidebarRagMode(value) {
 function chooseSidebarKnowledgeBase(value) {
   chatSettings.kbId = value
   persistSidebarSessionConfig()
+}
+
+async function chooseManagedPreset(presetId) {
+  const previous = chatSettings.presetId
+  chatSettings.presetId = presetId
+  try {
+    const sessionId = await ensureSidebarSession()
+    const updated = await updateChatSessionPreset(sessionId, presetId)
+    chatSessions.value = chatSessions.value.map(session => session.id === updated.id ? updated : session)
+    applySessionSettings(updated)
+    selectedManagedPresetId.value = presetId
+    configMessage.value = '已用于当前会话'
+  } catch (err) {
+    chatSettings.presetId = previous
+    configMessage.value = err?.message || '预设切换失败'
+  }
+}
+
+function resetPresetDraft() {
+  Object.assign(presetDraft, emptyPresetDraft())
+  editingPresetId.value = ''
+}
+
+function editPresetDraft(preset) {
+  editingPresetId.value = preset.id
+  itemDialogOpen.value = 'preset'
+  Object.assign(presetDraft, {
+    name: preset.name || '',
+    description: preset.description || '',
+    system_prompt: preset.system_prompt || '',
+    rag_prompt_hint: preset.rag_prompt_hint || '',
+  })
+}
+
+async function savePresetDraft() {
+  const payload = {
+    name: presetDraft.name,
+    description: presetDraft.description,
+    system_prompt: presetDraft.system_prompt,
+    rag_prompt_hint: presetDraft.rag_prompt_hint || null,
+  }
+  try {
+    const preset = editingPresetId.value
+      ? await updateChatPreset(editingPresetId.value, payload)
+      : await createChatPreset(payload)
+    selectedManagedPresetId.value = preset.id
+    configMessage.value = editingPresetId.value ? '预设已保存' : '预设已新增'
+    resetPresetDraft()
+    closeItemDialog()
+    await loadPresetManagement()
+  } catch (err) {
+    configMessage.value = err?.message || '预设保存失败'
+  }
+}
+
+async function removeManagedPreset(presetId) {
+  try {
+    await deleteChatPreset(presetId)
+    if (chatSettings.presetId === presetId) chatSettings.presetId = defaultPresetId.value
+    selectedManagedPresetId.value = ''
+    configMessage.value = '预设已删除'
+    await loadPresetManagement()
+    await loadChatSessions()
+  } catch (err) {
+    configMessage.value = err?.message || '预设删除失败'
+  }
 }
 
 async function runHistorySearch() {
@@ -570,16 +969,9 @@ watch(historySearchResults, (items) => {
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalKeydown)
   await loadSidebarModels()
+  await loadPresetManagement()
   await loadKnowledgeBases()
   await loadChatSessions()
-  try {
-    const res = await healthCheck()
-    healthStatus.value = 'ok'
-    healthText.value = `API v${res.version}`
-  } catch {
-    healthStatus.value = 'error'
-    healthText.value = 'API 离线'
-  }
 })
 
 watch(currentSession, (session) => {
@@ -596,24 +988,26 @@ onBeforeUnmount(() => {
 .sidebar-search-button {
   display: flex;
   width: 100%;
-  min-height: 36px;
+  min-height: 32px;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin: 2px 0 4px;
+  margin: 10px 0;
   border: 1px solid transparent;
-  border-radius: 12px;
-  background: rgba(241, 245, 249, 0.72);
-  padding: 8px 12px;
-  color: #94a3b8;
+  border-radius: 8px;
+  background: rgba(226, 232, 240, 0.5);
+  padding: 6px 12px;
+  color: #64748b;
   font-size: 12px;
+  cursor: pointer;
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
 .sidebar-search-button:hover {
-  border-color: #e2e8f0;
-  background: rgba(226, 232, 240, 0.72);
-  color: #475569;
+  border-color: rgba(203, 213, 225, 0.5);
+  background: rgba(226, 232, 240, 0.8);
+  color: #334155;
 }
 
 .sidebar-search-copy {
@@ -627,6 +1021,17 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sidebar-search-button kbd {
+  flex: 0 0 auto;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.6);
+  padding: 2px 6px;
+  color: #94a3b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .search-modal-backdrop {
@@ -751,61 +1156,499 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 2;
 }
 
-.sidebar-config-dock {
-  display: grid;
-  gap: 8px;
-  padding-top: 2px;
-}
-
-.sidebar-config-control {
-  position: relative;
-  display: grid;
-  gap: 6px;
-}
-
-.sidebar-config-button {
-  display: grid;
-  grid-template-columns: 28px 1fr;
-  width: 100%;
-  min-height: 48px;
+.config-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  border: 1px solid rgba(226, 232, 240, 0.84);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #475569;
-  padding: 8px 10px;
-  text-align: left;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
-  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.26);
+  padding: 24px;
+  backdrop-filter: blur(8px);
+  z-index: 90;
 }
 
-.sidebar-config-button:hover,
-.sidebar-config-button.active {
-  border-color: #cbd5e1;
+.config-modal {
+  display: grid;
+  width: min(980px, 100%);
+  max-height: min(86vh, 760px);
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.28);
+}
+
+.config-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #eef2f7;
+  padding: 16px 18px;
+}
+
+.config-modal-header div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.config-modal-header strong {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.config-modal-header span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.config-modal-header button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #94a3b8;
+}
+
+.config-modal-header button:hover {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.config-message {
+  margin: 10px 14px 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   background: #f8fafc;
+  padding: 9px 12px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.config-page-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.18);
+  padding: 20px;
+  backdrop-filter: blur(8px);
+  z-index: 90;
+}
+
+.config-page {
+  display: flex;
+  width: min(1180px, 100%);
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.88);
+  border-radius: 24px;
+  background: #f8fafc;
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.24);
+}
+
+.config-page-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  background: rgba(255, 255, 255, 0.78);
+  padding: 18px 20px;
+}
+
+.config-back-button {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: #64748b;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.config-back-button:hover {
+  background: #f1f5f9;
   color: #0f172a;
 }
 
-.config-icon {
+.config-page-title {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  text-align: center;
+}
+
+.config-page-title strong {
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.config-page-title span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-primary-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 12px;
+  background: #047857;
+  color: #ffffff;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.config-primary-button:hover {
+  background: #065f46;
+}
+
+.config-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.config-card-grid:hover {
+  scrollbar-color: rgba(203, 213, 225, 0.55) transparent;
+}
+
+.config-card-grid::-webkit-scrollbar {
+  width: 4px;
+}
+
+.config-card-grid::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.config-card-grid:hover::-webkit-scrollbar-thumb {
+  background: rgba(203, 213, 225, 0.55);
+}
+
+.config-card {
+  display: flex;
+  min-height: 218px;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
+}
+
+.config-card:hover {
+  border-color: #cbd5e1;
+  box-shadow: 0 16px 38px rgba(15, 23, 42, 0.10);
+  transform: translateY(-1px);
+}
+
+.config-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.config-card header div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.config-card header strong,
+.config-card header small,
+.config-card p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.config-card header strong {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.config-card header small {
+  color: #94a3b8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.config-card header span {
+  flex: 0 0 auto;
+  height: fit-content;
+  border-radius: 999px;
+  background: #f1f5f9;
+  padding: 3px 8px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.config-card p {
+  display: -webkit-box;
+  margin: 14px 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.config-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.config-card-meta span {
+  border-radius: 999px;
+  background: #f8fafc;
+  padding: 3px 8px;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.config-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid #f1f5f9;
+  padding-top: 12px;
+}
+
+.config-card footer div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.config-card footer button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #475569;
+  padding: 5px 7px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.config-card footer button:hover {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+.config-card footer .text-danger {
+  color: #dc2626;
+}
+
+.item-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 20px;
+  backdrop-filter: blur(3px);
+  z-index: 100;
+}
+
+.item-dialog {
+  display: grid;
+  width: min(448px, 100%);
+  max-height: min(86vh, 720px);
+  gap: 12px;
+  overflow: auto;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 24px;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.32);
+}
+
+.item-dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.item-dialog header strong {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 850;
+}
+
+.item-dialog header button {
   display: grid;
   width: 28px;
   height: 28px;
   place-items: center;
-  border-radius: 9px;
-  background: #f1f5f9;
+  border: 0;
+  border-radius: 8px;
+  background: #f8fafc;
   color: #64748b;
-  font-size: 13px;
 }
 
-.sidebar-config-button > span:last-child {
+.item-dialog label {
   display: grid;
-  min-width: 0;
-  gap: 1px;
+  gap: 5px;
+  color: #64748b;
+  font-size: 12px;
 }
 
-.sidebar-config-button strong,
-.sidebar-config-button small,
+.item-dialog input[type="text"],
+.item-dialog textarea {
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 9px 11px;
+  color: #0f172a;
+  font-size: 13px;
+  outline: 0;
+}
+
+.item-dialog input[type="text"]:focus,
+.item-dialog textarea:focus {
+  border-color: #cbd5e1;
+  background: #ffffff;
+}
+
+.item-dialog textarea {
+  resize: vertical;
+}
+
+.item-dialog-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.item-dialog-checks label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.item-dialog-save {
+  min-height: 40px;
+  border: 0;
+  border-radius: 12px;
+  background: #047857;
+  color: white;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.item-dialog-save:hover {
+  background: #065f46;
+}
+
+@media (max-width: 1024px) {
+  .config-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .config-page-backdrop {
+    padding: 0;
+  }
+
+  .config-page {
+    height: 100%;
+    border-radius: 0;
+  }
+
+  .config-page-header {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    text-align: left;
+  }
+
+  .config-page-title {
+    text-align: left;
+  }
+
+  .config-card-grid {
+    grid-template-columns: 1fr;
+    padding: 16px;
+  }
+}
+
+.sidebar-config-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: auto;
+  border-top: 1px solid rgba(226, 232, 240, 0.6);
+  padding: 8px 0 4px;
+}
+
+.sidebar-config-bar {
+  order: 2;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  border-radius: 12px;
+  background: rgba(226, 232, 240, 0.4);
+  padding: 6px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.sidebar-config-pill {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #475569;
+  padding: 6px;
+  transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.sidebar-config-pill:hover,
+.sidebar-config-pill.active {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.sidebar-config-pill span {
+  flex: 0 0 auto;
+}
+
+.sidebar-config-pill strong,
 .sidebar-option strong,
 .sidebar-option small,
 .sidebar-option > span {
@@ -814,19 +1657,16 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.sidebar-config-button strong {
-  font-size: 12px;
-  font-weight: 750;
-}
-
-.sidebar-config-button small {
-  color: #94a3b8;
+.sidebar-config-pill strong {
+  min-width: 0;
   font-size: 11px;
+  font-weight: 650;
 }
 
 .sidebar-config-panel {
+  order: 1;
   display: grid;
-  max-height: min(42vh, 340px);
+  max-height: min(40vh, 320px);
   gap: 5px;
   overflow: auto;
   border: 1px solid rgba(226, 232, 240, 0.9);
@@ -834,6 +1674,29 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.98);
   padding: 6px;
   box-shadow: 0 16px 42px rgba(15, 23, 42, 0.14);
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.sidebar-config-panel:hover {
+  scrollbar-color: rgba(203, 213, 225, 0.52) transparent;
+}
+
+.sidebar-config-panel::-webkit-scrollbar {
+  width: 4px;
+}
+
+.sidebar-config-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-config-panel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.sidebar-config-panel:hover::-webkit-scrollbar-thumb {
+  background: rgba(203, 213, 225, 0.52);
 }
 
 .sidebar-option-group {

@@ -140,6 +140,65 @@ class ChatSessionPresetUpdate(BaseModel):
         return stripped
 
 
+class ChatModelCreate(BaseModel):
+    id: Optional[str] = None
+    provider: str = Field(..., min_length=1)
+    display_name: str = Field(..., min_length=1)
+    model_name: str = Field(..., min_length=1)
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
+    description: str = ""
+    supports_stream: bool = True
+    supports_tools: bool = False
+    supports_vision: bool = False
+    enabled: bool = True
+
+    @field_validator("id", "provider", "display_name", "model_name", "base_url", "api_key_env")
+    @classmethod
+    def optional_text_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("field cannot be empty")
+        return stripped
+
+
+class ChatModelUpdate(BaseModel):
+    provider: Optional[str] = None
+    display_name: Optional[str] = None
+    model_name: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
+    description: Optional[str] = None
+    supports_stream: Optional[bool] = None
+    supports_tools: Optional[bool] = None
+    supports_vision: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+    @field_validator("provider", "display_name", "model_name", "base_url", "api_key_env")
+    @classmethod
+    def optional_text_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("field cannot be empty")
+        return stripped
+
+
+class ChatModelDefaultUpdate(BaseModel):
+    model_id: str = Field(..., min_length=1)
+
+    @field_validator("model_id")
+    @classmethod
+    def model_id_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("model_id cannot be empty")
+        return stripped
+
+
 class ChatPreset(BaseModel):
     id: str
     name: str

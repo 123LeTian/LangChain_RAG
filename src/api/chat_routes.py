@@ -23,6 +23,9 @@ from src.chat.schemas import (
     ChatMessage,
     ChatMessageCreate,
     ChatExportResponse,
+    ChatModelCreate,
+    ChatModelDefaultUpdate,
+    ChatModelUpdate,
     ChatPresetCreate,
     ChatPresetUpdate,
     ChatSearchResponse,
@@ -35,7 +38,7 @@ from src.chat.schemas import (
     ChatSessionUpdate,
     ChatStreamRequest,
 )
-from src.chat.model_registry import ModelNotFoundError
+from src.chat.model_registry import ModelNotFoundError, ModelReadOnlyError
 from src.chat.preset_service import (
     ChatPresetNotFoundError,
     ChatPresetReadOnlyError,
@@ -56,6 +59,76 @@ async def list_models(
     registry: ModelRegistryDep = None,  # type: ignore
 ) -> dict:
     return registry.public_response()
+
+
+@router.get("/models/manage")
+async def manage_models(
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    return registry.public_management_response()
+
+
+@router.post("/models", status_code=201)
+async def create_model(
+    request: ChatModelCreate,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    try:
+        return registry.create_model(request).public_dict()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+
+@router.patch("/models/default")
+async def set_default_model(
+    request: ChatModelDefaultUpdate,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    try:
+        return registry.set_default_model(request.model_id).public_dict()
+    except ModelNotFoundError:
+        raise ValidationError(f"Model {request.model_id} is not available")
+
+
+@router.patch("/models/{model_id}")
+async def update_model(
+    model_id: str,
+    request: ChatModelUpdate,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    try:
+        return registry.update_model(model_id, request).public_dict()
+    except ModelReadOnlyError:
+        raise ValidationError(f"Model {model_id} is read-only")
+    except ModelNotFoundError:
+        raise NotFoundError(f"Model {model_id} not found")
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+
+@router.delete("/models/{model_id}", status_code=204)
+async def delete_model(
+    model_id: str,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> Response:
+    try:
+        registry.delete_model(model_id)
+    except ModelReadOnlyError:
+        raise ValidationError(f"Model {model_id} is read-only")
+    except ModelNotFoundError:
+        raise NotFoundError(f"Model {model_id} not found")
+    return Response(status_code=204)
+
+
+@router.post("/models/{model_id}/test")
+async def test_model_connection(
+    model_id: str,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    try:
+        return registry.test_connection(model_id)
+    except ModelNotFoundError:
+        raise NotFoundError(f"Model {model_id} not found")
 
 
 @router.get("/presets")
