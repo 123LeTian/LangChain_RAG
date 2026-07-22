@@ -40,6 +40,33 @@ class ErrorRAGService:
         raise RuntimeError("500 DEEPSEEK_API_KEY failed with api_key=secret-value")
 
 
+def _test_model_registry(tmp_path) -> ModelRegistry:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "models:",
+                "  - id: local-test",
+                "    provider: local",
+                "    display_name: Local Test",
+                "    model_name: local-test",
+                "    base_url: null",
+                "    api_key_env: null",
+                "    description: Test-only non-mock model.",
+                "    supports_stream: true",
+                "    enabled: true",
+                "    is_default: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return ModelRegistry(
+        config_path,
+        custom_path=tmp_path / "custom_models.json",
+        secret_path=tmp_path / ".env.test",
+    )
+
+
 def _read_sse(response) -> List[Dict[str, Any]]:
     events = []
     for line in response.iter_lines():
@@ -68,7 +95,7 @@ def _client(tmp_path, rag_service):
         message_service,
         MemoryService(message_service),
         gateway,
-        ModelRegistry(),
+        _test_model_registry(tmp_path),
         logger=logger,
     )
     app.dependency_overrides[get_chat_session_service] = lambda: session_service
@@ -94,7 +121,7 @@ def test_successful_chat_stream_writes_app_log(tmp_path):
     assert record["event"] == "chat_stream_done"
     assert record["request_id"] == events[-1]["request_id"]
     assert record["session_id"] == session["id"]
-    assert record["model_id"] == "deepseek-chat"
+    assert record["model_id"] == "local-test"
     assert record["rag_mode"] == "advanced"
 
 

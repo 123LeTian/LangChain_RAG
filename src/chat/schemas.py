@@ -148,18 +148,19 @@ class ChatSessionPresetUpdate(BaseModel):
 
 class ChatModelCreate(BaseModel):
     id: Optional[str] = None
-    provider: str = Field(..., min_length=1)
+    provider: str = Field(default="openai", min_length=1)
     display_name: str = Field(..., min_length=1)
     model_name: str = Field(..., min_length=1)
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    api_key: Optional[str] = None
     description: str = ""
     supports_stream: bool = True
     supports_tools: bool = False
     supports_vision: bool = False
     enabled: bool = True
 
-    @field_validator("id", "provider", "display_name", "model_name", "base_url", "api_key_env")
+    @field_validator("id", "provider", "display_name", "model_name", "base_url", "api_key_env", "api_key")
     @classmethod
     def optional_text_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -176,13 +177,14 @@ class ChatModelUpdate(BaseModel):
     model_name: Optional[str] = None
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    api_key: Optional[str] = None
     description: Optional[str] = None
     supports_stream: Optional[bool] = None
     supports_tools: Optional[bool] = None
     supports_vision: Optional[bool] = None
     enabled: Optional[bool] = None
 
-    @field_validator("provider", "display_name", "model_name", "base_url", "api_key_env")
+    @field_validator("provider", "display_name", "model_name", "base_url", "api_key_env", "api_key")
     @classmethod
     def optional_text_must_not_be_blank(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -202,6 +204,19 @@ class ChatModelDefaultUpdate(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("model_id cannot be empty")
+        return stripped
+
+
+class ChatModelDiscoverRequest(BaseModel):
+    base_url: str = Field(..., min_length=1)
+    api_key: str = Field(..., min_length=1)
+
+    @field_validator("base_url", "api_key")
+    @classmethod
+    def required_text_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("field cannot be empty")
         return stripped
 
 

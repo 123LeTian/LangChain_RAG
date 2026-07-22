@@ -10,6 +10,7 @@ from src.chat.memory_service import MemoryService
 from src.chat.message_service import MessageService
 from src.chat.model_registry import ModelRegistry
 from src.chat.preset_service import PresetService
+from src.chat.preset_service import ChatPresetNotFoundError
 from src.chat.rag_gateway import RAGGateway
 from src.chat.structured_logger import StructuredLogger
 from src.chat.schemas import (
@@ -218,7 +219,10 @@ class ChatApplicationService:
     def _resolve_preset(self, preset_id: str | None):
         if self._preset_service is None:
             return None
-        return self._preset_service.resolve(preset_id)
+        try:
+            return self._preset_service.resolve(preset_id)
+        except ChatPresetNotFoundError:
+            return self._preset_service.default_preset()
 
     def _make_title(self, question: str) -> str:
         stripped = question.strip()

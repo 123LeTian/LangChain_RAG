@@ -40,11 +40,7 @@ def test_list_presets_returns_system_presets(client):
     assert response.status_code == 200
     data = response.json()
     ids = [preset["id"] for preset in data["presets"]]
-    assert "rigorous-report" in ids
-    assert "concise-summary" in ids
-    assert "code-structured" in ids
-    assert "rag-expert" in ids
-    assert DEFAULT_PRESET_ID in ids
+    assert ids == [DEFAULT_PRESET_ID, "rag-evidence", "engineering-copilot"]
 
 
 def test_list_presets_has_default_and_hides_system_prompt(client):
@@ -116,7 +112,7 @@ def test_delete_user_preset(client):
 def test_cannot_delete_system_preset(client):
     test_client, _ = client
 
-    response = test_client.delete("/api/chat/presets/rigorous-report")
+    response = test_client.delete("/api/chat/presets/rag-evidence")
 
     assert response.status_code == 422
 
@@ -125,7 +121,7 @@ def test_cannot_update_system_preset(client):
     test_client, _ = client
 
     response = test_client.patch(
-        "/api/chat/presets/rigorous-report",
+        "/api/chat/presets/rag-evidence",
         json={"name": "Changed"},
     )
 
@@ -138,11 +134,11 @@ def test_update_session_preset(client):
 
     response = test_client.patch(
         f"/api/chat/sessions/{session['id']}/preset",
-        json={"preset_id": "rigorous-report"},
+        json={"preset_id": "rag-evidence"},
     )
 
     assert response.status_code == 200
-    assert response.json()["preset_id"] == "rigorous-report"
+    assert response.json()["preset_id"] == "rag-evidence"
 
 
 def test_missing_preset_returns_404(client):

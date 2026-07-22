@@ -18,6 +18,7 @@ import type {
   ChatStreamRequest,
   ChatModel,
   ChatModelConnectionResult,
+  ChatModelDiscoveryResponse,
   ChatModelPayload,
   ChatModelsResponse,
   ChatPreset,
@@ -197,6 +198,16 @@ export async function manageChatModels(): Promise<ChatModelsResponse> {
 
 export async function createChatModel(payload: ChatModelPayload): Promise<ChatModel> {
   return request('/api/chat/models', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function discoverChatModels(payload: {
+  base_url: string
+  api_key: string
+}): Promise<ChatModelDiscoveryResponse> {
+  return request('/api/chat/models/discover', {
     method: 'POST',
     body: JSON.stringify(payload),
   })

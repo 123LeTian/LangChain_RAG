@@ -39,6 +39,7 @@
                 </article>
               </div>
 
+              <div v-if="msg.stopped" class="stopped-notice">对话已停止</div>
               <div v-if="msg.content" class="message-body markdown-body" v-html="renderMarkdown(msg.content)" />
 
               <footer v-if="msg.content" class="ai-action-footer">
@@ -323,6 +324,10 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  modelOptions: {
+    type: Array,
+    default: () => [],
+  },
   newChatSignal: {
     type: Number,
     default: 0,
@@ -390,6 +395,7 @@ function normalizeMessage(message) {
     created_at: message.created_at,
     isStreaming: false,
     thinking: false,
+    stopped: false,
     summaryOpen: false,
     modelLabel: currentModelLabel.value,
     modeLabel: currentModeLabel.value,
@@ -478,6 +484,7 @@ async function sendQuery() {
     retry_count: 0,
     isStreaming: true,
     thinking: true,
+    stopped: false,
     summaryOpen: false,
     modelLabel: currentModelLabel.value,
     modeLabel: currentModeLabel.value,
@@ -568,6 +575,7 @@ function cancelQuery() {
   if (currentAssistant) {
     currentAssistant.thinking = false
     currentAssistant.isStreaming = false
+    currentAssistant.stopped = true
     currentAssistant.summaryOpen = false
   }
   streaming.value = false
@@ -763,12 +771,12 @@ async function scrollToBottom() {
 async function loadModels() {
   try {
     const data = await listChatModels()
-    modelOptions.value = data.models.map(model => ({
+    applyModelOptions(data.models.map(model => ({
       value: model.id,
       label: model.display_name,
       provider: model.provider,
       model,
-    }))
+    })))
     defaultModelId.value = data.default_model_id || modelOptions.value[0]?.value || 'mock-chat'
     if (!modelOptions.value.some(item => item.value === generationSettings.value.model)) {
       generationSettings.value.model = defaultModelId.value
@@ -777,6 +785,25 @@ async function loadModels() {
     errorText.value = err?.message || '模型列表加载失败'
     modelOptions.value = [{ value: 'mock-chat', label: 'Mock Chat' }]
     defaultModelId.value = 'mock-chat'
+  }
+}
+
+function applyModelOptions(options) {
+  const normalized = (options || [])
+    .map(item => ({
+      value: item.value || item.id,
+      label: item.label || item.display_name || item.model_name || item.id,
+      provider: item.provider,
+      model: item.model || item,
+    }))
+    .filter(item => item.value)
+  if (!normalized.length) return
+  modelOptions.value = normalized
+  if (!modelOptions.value.some(item => item.value === generationSettings.value.model)) {
+    const preferred = props.chatSettings.modelId || defaultModelId.value || modelOptions.value[0]?.value
+    generationSettings.value.model = modelOptions.value.some(item => item.value === preferred)
+      ? preferred
+      : modelOptions.value[0]?.value
   }
 }
 
@@ -825,6 +852,10 @@ watch(() => props.chatSettings.modelId, (modelId) => {
     generationSettings.value.model = modelId
   }
 })
+
+watch(() => props.modelOptions, (options) => {
+  applyModelOptions(options)
+}, { deep: true, immediate: true })
 
 watch(() => props.chatSettings.presetId, (presetId) => {
   if (presetId && presetId !== generationSettings.value.preset) {
@@ -935,6 +966,27 @@ watch(() => props.newChatSignal, () => {
 .message.assistant .message-body {
   font-size: 16px;
   line-height: 1.75;
+}
+
+.stopped-notice {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 8px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #92400e;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.stopped-notice::before {
+  content: "■";
+  color: #f59e0b;
+  font-size: 8px;
 }
 
 .message-body.thinking {

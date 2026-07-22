@@ -91,6 +91,40 @@ def test_model_management_does_not_expose_api_key_env(client, monkeypatch):
     assert "key_configured" in payload
 
 
+def test_create_model_with_plain_api_key_generates_secret_reference(tmp_path, monkeypatch):
+    registry = ModelRegistry(
+        custom_path=tmp_path / "custom_models.json",
+        secret_path=tmp_path / ".env.test",
+    )
+    monkeypatch.delenv("MODEL_DEEPSEEK_CHAT_88B0D840_API_KEY", raising=False)
+
+    model = registry.create_model(
+        {
+            "provider": "deepseek",
+            "display_name": "DeepSeek Chat",
+            "model_name": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "secret-value",
+        }
+    )
+
+    payload = (tmp_path / "custom_models.json").read_text(encoding="utf-8")
+    assert model.api_key_env
+    assert model.api_key_env.startswith("MODEL_DEEPSEEK_CHAT_")
+    assert "secret-value" not in payload
+    assert "secret-value" in (tmp_path / ".env.test").read_text(encoding="utf-8")
+    assert model.public_dict()["key_configured"] is True
+
+
+def test_discover_models_validates_base_url(client):
+    response = client.post(
+        "/api/chat/models/discover",
+        json={"base_url": "not-a-url", "api_key": "secret-value"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_list_chat_models_has_one_default_model(client):
     response = client.get("/api/chat/models")
 

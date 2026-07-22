@@ -15,7 +15,9 @@ from src.api.dependencies import (
 from src.chat.chat_application_service import ChatApplicationService
 from src.chat.memory_service import MemoryService
 from src.chat.message_service import MessageService
+from src.chat.model_registry import ChatModel
 from src.chat.model_registry import ModelRegistry
+from src.chat.rag_gateway import RAGGateway
 from src.chat.session_service import SessionService
 from src.chat_storage.sqlite_chat_store import SQLiteChatStore
 
@@ -264,3 +266,43 @@ def test_original_rag_stream_route_still_registered(client):
     paths = {getattr(route, "path", "") for route in app.routes}
 
     assert "/api/rag/query/stream" in paths
+
+
+@pytest.mark.asyncio
+async def test_model_identity_question_uses_current_model_without_rag():
+    class RecordingRAG:
+        def __init__(self):
+            self.called = False
+
+        async def query(self, request):
+            self.called = True
+            raise AssertionError("model identity questions should not call RAG")
+
+    rag = RecordingRAG()
+    gateway = RAGGateway(rag)
+    model = ChatModel(
+        id="deepseek-v4-pro",
+        provider="deepseek",
+        display_name="deepseek-v4-pro",
+        model_name="deepseek-v4-pro",
+        base_url="https://api.deepseek.com/v1",
+        api_key_env="DEEPSEEK_API_KEY",
+    )
+
+    events = [
+        event
+        async for event in gateway.stream(
+            session_id="session-1",
+            original_question="你是什么模型",
+            context_enhanced_question="你是什么模型",
+            model_id=model.id,
+            model_config=model,
+            rag_mode="advanced",
+            knowledge_base_id="kb-1",
+        )
+    ]
+
+    assert rag.called is False
+    assert events[-1]["type"] == "done"
+    assert "deepseek-v4-pro" in events[-1]["content"]
+    assert events[-1]["citations"] == []

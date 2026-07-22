@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -68,11 +69,24 @@ class ModelConnectionError(Exception):
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def model_api_key_env_name(model_name: str, base_url: str = "") -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", model_name).strip("_").upper() or "CUSTOM"
+    identity = f"{base_url.strip().rstrip('/').casefold()}\n{model_name.strip()}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8].upper()
+    return f"MODEL_{slug[:80]}_{digest}_API_KEY"
+
+
 class ModelRegistry:
-    def __init__(self, config_path: Optional[Path] = None, custom_path: Optional[Path] = None):
+    def __init__(
+        self,
+        config_path: Optional[Path] = None,
+        custom_path: Optional[Path] = None,
+        secret_path: Optional[Path] = None,
+    ):
         runtime = get_runtime_config()
         self.config_path = config_path or get_runtime_config().model_config_path
         self.custom_path = custom_path or runtime.data_dir / "chat" / "custom_models.json"
+        self.secret_path = secret_path or runtime.project_root / f".env.{runtime.env}"
         self._models = self._load_models()
 
     def list_models(self) -> List[ChatModel]:
@@ -140,7 +154,13 @@ class ModelRegistry:
 
     def create_model(self, payload: Any) -> ChatModel:
         data = payload.model_dump(exclude_unset=True) if hasattr(payload, "model_dump") else dict(payload)
+        api_key = self._optional_secret(data.pop("api_key", None))
         data["id"] = data.get("id") or f"custom-{uuid.uuid4().hex[:12]}"
+        if api_key and not data.get("api_key_env"):
+            data["api_key_env"] = model_api_key_env_name(
+                str(data.get("model_name") or ""),
+                str(data.get("base_url") or ""),
+            )
         data["is_builtin"] = False
         data["is_default"] = False
         model = ChatModel(**data)
@@ -149,6 +169,8 @@ class ModelRegistry:
             raise ValueError("Model id already exists")
         if any(item.model_name == model.model_name and item.provider == model.provider for item in self._models):
             raise ValueError("Model already exists")
+        if api_key and model.api_key_env:
+            self._persist_api_key(model.api_key_env, api_key)
         custom = self._load_custom_payload()
         custom["models"] = [*custom.get("models", []), model.model_dump()]
         self._write_custom_payload(custom)
@@ -160,12 +182,20 @@ class ModelRegistry:
         if model.is_builtin:
             raise ModelReadOnlyError(model_id)
         changes = payload.model_dump(exclude_unset=True) if hasattr(payload, "model_dump") else dict(payload)
+        api_key = self._optional_secret(changes.pop("api_key", None))
         candidate = model.model_dump()
         candidate.update(changes)
         candidate["id"] = model.id
         candidate["is_builtin"] = False
+        if api_key and not candidate.get("api_key_env"):
+            candidate["api_key_env"] = model_api_key_env_name(
+                str(candidate.get("model_name") or ""),
+                str(candidate.get("base_url") or ""),
+            )
         updated = ChatModel(**candidate)
         self._validate_custom_model(updated)
+        if api_key and updated.api_key_env:
+            self._persist_api_key(updated.api_key_env, api_key)
         custom = self._load_custom_payload()
         custom["models"] = [
             updated.model_dump() if item.get("id") == model_id else item
@@ -220,6 +250,22 @@ class ModelRegistry:
                 "message": _sanitize_connection_error(exc),
                 "model_id": model.id,
             }
+
+    def discover_model_ids(self, base_url: str, api_key: str) -> Dict[str, Any]:
+        clean_base_url = base_url.strip().rstrip("/")
+        parsed = urlparse(clean_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("API Base URL must be http(s)")
+        clean_api_key = api_key.strip()
+        if not clean_api_key:
+            raise ValueError("API Key cannot be empty")
+        try:
+            return {
+                "models": self._fetch_model_ids(clean_base_url, clean_api_key),
+                "base_url": clean_base_url,
+            }
+        except Exception as exc:
+            raise ValueError(_sanitize_connection_error(exc)) from exc
 
     def _load_models(self) -> List[ChatModel]:
         if self.config_path.exists():
@@ -344,6 +390,47 @@ class ModelRegistry:
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
                 raise ValueError("Base URL must be http(s)")
 
+    def _optional_secret(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _persist_api_key(self, env_name: str, api_key: str) -> None:
+        if not ENV_NAME_PATTERN.fullmatch(env_name):
+            raise ValueError("API key env name is invalid")
+        secret = api_key.strip()
+        if not secret:
+            raise ValueError("API Key cannot be empty")
+        self.secret_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = (
+            self.secret_path.read_text(encoding="utf-8").splitlines(keepends=True)
+            if self.secret_path.exists()
+            else []
+        )
+        replacement = f"{env_name}={secret}\n"
+        matched = False
+        next_lines: list[str] = []
+        for line in lines:
+            if re.match(rf"^\s*{re.escape(env_name)}\s*=", line):
+                if not matched:
+                    next_lines.append(replacement)
+                    matched = True
+                continue
+            next_lines.append(line)
+        if not matched:
+            if next_lines and not next_lines[-1].endswith(("\n", "\r")):
+                next_lines[-1] += "\n"
+            next_lines.append(replacement)
+        temp = self.secret_path.with_suffix(self.secret_path.suffix + ".tmp")
+        try:
+            temp.write_text("".join(next_lines), encoding="utf-8")
+            temp.replace(self.secret_path)
+        finally:
+            if temp.exists():
+                temp.unlink()
+        os.environ[env_name] = secret
+
     def get_model(self, model_id: str) -> ChatModel:
         for model in self.list_models():
             if model.id == model_id:
@@ -362,6 +449,30 @@ class ModelRegistry:
         with urlopen(request, timeout=5) as response:  # noqa: S310 - URL is user configured.
             response.read(1)
 
+    def _fetch_model_ids(self, base_url: str, api_key: str) -> List[str]:
+        request = Request(
+            f"{base_url.rstrip('/')}/models",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="GET",
+        )
+        with urlopen(request, timeout=10) as response:  # noqa: S310 - URL is user configured.
+            payload = json.load(response)
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, list):
+            raise ValueError("Invalid model list response")
+        model_ids: List[str] = []
+        for item in data:
+            model_id = item.get("id") if isinstance(item, Mapping) else None
+            clean_id = model_id.strip() if isinstance(model_id, str) else ""
+            if clean_id and clean_id not in model_ids:
+                model_ids.append(clean_id)
+        if not model_ids:
+            raise ValueError("Model list is empty")
+        return model_ids
+
 
 def _sanitize_connection_error(exc: Exception) -> str:
     text = str(exc) or exc.__class__.__name__
@@ -376,4 +487,5 @@ __all__ = [
     "ModelNotFoundError",
     "ModelReadOnlyError",
     "ModelRegistry",
+    "model_api_key_env_name",
 ]

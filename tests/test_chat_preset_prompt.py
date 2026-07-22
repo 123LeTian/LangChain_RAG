@@ -20,7 +20,7 @@ from src.chat.message_service import MessageService
 from src.chat.model_registry import ModelRegistry
 from src.chat.preset_service import DEFAULT_PRESET_ID, PresetService
 from src.chat.rag_gateway import RAGGateway
-from src.chat.schemas import ChatPreset
+from src.chat.schemas import ChatPreset, ChatSessionCreate, ChatSessionUpdate, ChatStreamRequest
 from src.chat.session_service import SessionService
 from src.chat_storage.sqlite_chat_store import SQLiteChatStore
 
@@ -87,20 +87,20 @@ def test_stream_request_preset_reaches_rag_gateway(preset_client):
     with client.stream(
         "POST",
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "What is RAG?", "preset_id": "rigorous-report"},
+        json={"question": "What is RAG?", "preset_id": "rag-evidence"},
     ) as response:
         assert response.status_code == 200
         _read_sse(response)
 
-    assert gateway.calls[-1]["preset_id"] == "rigorous-report"
-    assert gateway.calls[-1]["preset_config"].name == "严谨研报"
+    assert gateway.calls[-1]["preset_id"] == "rag-evidence"
+    assert gateway.calls[-1]["preset_config"].name == "RAG 证据专家"
 
 
 def test_stream_uses_session_preset_when_request_omits_preset(preset_client):
     client, gateway = preset_client
     session = client.post(
         "/api/chat/sessions",
-        json={"title": "chat", "preset_id": "concise-summary"},
+        json={"title": "chat", "preset_id": "engineering-copilot"},
     ).json()
 
     with client.stream(
@@ -111,7 +111,7 @@ def test_stream_uses_session_preset_when_request_omits_preset(preset_client):
         assert response.status_code == 200
         _read_sse(response)
 
-    assert gateway.calls[-1]["preset_id"] == "concise-summary"
+    assert gateway.calls[-1]["preset_id"] == "engineering-copilot"
 
 
 def test_stream_uses_default_preset_without_request_or_session_preset(preset_client):
@@ -126,6 +126,39 @@ def test_stream_uses_default_preset_without_request_or_session_preset(preset_cli
         assert response.status_code == 200
         _read_sse(response)
 
+    assert gateway.calls[-1]["preset_id"] == DEFAULT_PRESET_ID
+
+
+@pytest.mark.asyncio
+async def test_stream_falls_back_to_default_when_saved_preset_was_removed(tmp_path):
+    store = SQLiteChatStore(tmp_path / "chat.db")
+    session_service = SessionService(store)
+    message_service = MessageService(store)
+    preset_service = PresetService(store)
+    gateway = FakeRAGGateway()
+    app_service = ChatApplicationService(
+        session_service,
+        message_service,
+        MemoryService(message_service),
+        gateway,
+        ModelRegistry(custom_path=tmp_path / "custom_models.json"),
+        preset_service,
+    )
+    session = session_service.create_session(ChatSessionCreate(title="chat"))
+    session_service.update_session(
+        session.id,
+        ChatSessionUpdate(preset_id="legacy-removed-preset"),
+    )
+
+    events = [
+        event
+        async for event in app_service.stream_session(
+            session.id,
+            ChatStreamRequest(question="What is RAG?"),
+        )
+    ]
+
+    assert events[-1]["type"] == "done"
     assert gateway.calls[-1]["preset_id"] == DEFAULT_PRESET_ID
 
 

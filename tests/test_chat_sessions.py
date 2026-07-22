@@ -114,7 +114,7 @@ def test_update_session_config_fields(client):
         "/api/chat/sessions",
         json={
             "title": "config",
-            "model_id": "deepseek-chat",
+            "model_id": "mock-chat",
             "preset_id": "default-assistant",
             "rag_mode": "naive",
             "knowledge_base_id": "kb_1",
@@ -124,7 +124,7 @@ def test_update_session_config_fields(client):
     response = test_client.patch(
         f"/api/chat/sessions/{created['id']}",
         json={
-            "model_id": "deepseek-reasoner",
+            "model_id": "mock-chat",
             "preset_id": None,
             "rag_mode": "advanced",
             "knowledge_base_id": None,
@@ -134,7 +134,7 @@ def test_update_session_config_fields(client):
     assert response.status_code == 200
     data = response.json()
     assert data["title"] == "config"
-    assert data["model_id"] == "deepseek-reasoner"
+    assert data["model_id"] == "mock-chat"
     assert data["preset_id"] is None
     assert data["rag_mode"] == "advanced"
     assert data["knowledge_base_id"] is None

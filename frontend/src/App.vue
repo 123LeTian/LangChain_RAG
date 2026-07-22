@@ -104,6 +104,7 @@
           :is="Component"
           :chat-settings="chatSettings"
           :knowledge-bases="knowledgeBases"
+          :model-options="sidebarModelOptions"
           :current-session-id="currentSessionId"
           :new-chat-signal="newChatSignal"
           @session-created="handleSessionCreated"
@@ -195,7 +196,7 @@
             <article
               v-for="model in managedModels"
               :key="model.id"
-              class="config-card"
+              :class="['config-card', modelTestStates[model.id]?.status ? `test-${modelTestStates[model.id].status}` : '']"
             >
               <header>
                 <div>
@@ -210,9 +211,15 @@
                 <span>{{ model.key_required ? (model.key_configured ? '密钥已配置' : '缺少密钥') : '无需密钥' }}</span>
                 <span>{{ model.supports_stream ? '流式' : '非流式' }}</span>
               </div>
+              <div v-if="modelTestStates[model.id]?.message" class="model-test-chip">
+                <strong>{{ modelTestStates[model.id].status === 'success' ? '测试通过' : modelTestStates[model.id].status === 'running' ? '测试中' : '测试失败' }}</strong>
+                <span>{{ modelTestStates[model.id].message }}</span>
+              </div>
               <footer>
                 <div>
-                  <button type="button" @click="testManagedModel(model.id)">测试连接</button>
+                  <button type="button" :disabled="modelTestStates[model.id]?.status === 'running'" @click="testManagedModel(model.id)">
+                    {{ modelTestStates[model.id]?.status === 'running' ? '测试中' : '测试连接' }}
+                  </button>
                   <button type="button" @click="chooseManagedModel(model.id)">用于当前</button>
                   <button type="button" @click="setDefaultModel(model.id)">设默认</button>
                   <button v-if="!model.is_builtin" type="button" @click="editModelDraft(model)">编辑</button>
@@ -286,36 +293,59 @@
             <button type="button" aria-label="关闭" @click="closeItemDialog">×</button>
           </header>
           <label>
-            <span>名称</span>
-            <input v-model="modelDraft.display_name" type="text" placeholder="DeepSeek Pro" />
+            <span>API Base URL</span>
+            <input v-model="modelDraft.base_url" type="text" placeholder="https://api.openai.com/v1" />
+          </label>
+          <label>
+            <span>API Key</span>
+            <div class="secret-input-wrap">
+              <input
+                v-model="modelDraft.api_key"
+                :type="modelApiKeyVisible ? 'text' : 'password'"
+                placeholder="sk-..."
+                autocomplete="off"
+              />
+              <button type="button" @click="modelApiKeyVisible = !modelApiKeyVisible">
+                {{ modelApiKeyVisible ? '隐藏' : '显示' }}
+              </button>
+            </div>
+          </label>
+          <div class="model-discovery-actions">
+            <button type="button" :disabled="modelDiscoveryLoading" @click="fetchAvailableModels">
+              {{ modelDiscoveryLoading ? '获取中...' : '获取可用模型' }}
+            </button>
+            <button type="button" class="link-button" @click="toggleManualModelInput">
+              {{ modelDiscoveryManual ? '返回模型列表' : '手动填写模型 ID' }}
+            </button>
+          </div>
+          <div v-if="modelDiscoveryError" class="model-discovery-error">{{ modelDiscoveryError }}</div>
+          <div v-if="discoveredModelIds.length && !modelDiscoveryManual" class="model-picker">
+            <span>选择模型</span>
+            <div>
+              <button
+                v-for="modelId in discoveredModelIds"
+                :key="modelId"
+                :class="{ selected: modelDraft.model_name === modelId }"
+                type="button"
+                @click="selectDiscoveredModel(modelId)"
+              >
+                {{ modelId }}
+              </button>
+            </div>
+          </div>
+          <label v-if="modelDiscoveryManual || !discoveredModelIds.length">
+            <span>模型 ID</span>
+            <input v-model="modelDraft.model_name" type="text" placeholder="deepseek-chat / gpt-4o / qwen-plus" />
+          </label>
+          <label>
+            <span>显示名称</span>
+            <input v-model="modelDraft.display_name" type="text" placeholder="DeepSeek Chat" />
           </label>
           <label>
             <span>描述</span>
             <input v-model="modelDraft.description" type="text" placeholder="用途或备注" />
           </label>
-          <label>
-            <span>Provider</span>
-            <input v-model="modelDraft.provider" type="text" placeholder="deepseek / openai / ollama" />
-          </label>
-          <label>
-            <span>模型名</span>
-            <input v-model="modelDraft.model_name" type="text" placeholder="mock-chat" />
-          </label>
-          <label>
-            <span>Base URL</span>
-            <input v-model="modelDraft.base_url" type="text" placeholder="https://api.example.com/v1" />
-          </label>
-          <label>
-            <span>独立密钥环境变量</span>
-            <input v-model="modelDraft.api_key_env" type="text" placeholder="MY_MODEL_API_KEY" />
-          </label>
-          <div class="item-dialog-checks">
-            <label><input v-model="modelDraft.enabled" type="checkbox" /> 启用</label>
-            <label><input v-model="modelDraft.supports_stream" type="checkbox" /> 流式</label>
-            <label><input v-model="modelDraft.supports_tools" type="checkbox" /> Tools</label>
-            <label><input v-model="modelDraft.supports_vision" type="checkbox" /> Vision</label>
-          </div>
-          <button class="item-dialog-save" type="submit">保存</button>
+          <button class="item-dialog-save" type="submit">保存模型</button>
         </form>
 
         <form
@@ -362,6 +392,7 @@ import {
   deleteChatSession,
   deleteChatModel,
   deleteChatPreset,
+  discoverChatModels,
   exportChatSession,
   listChatModels,
   listChatPresets,
@@ -402,6 +433,12 @@ const managedModels = ref([])
 const modelKeyMetrics = ref({ configured: 0, required: 0, missing: 0, independent: 0 })
 const selectedManagedModelId = ref('')
 const editingModelId = ref('')
+const modelTestStates = reactive({})
+const discoveredModelIds = ref([])
+const modelDiscoveryLoading = ref(false)
+const modelDiscoveryManual = ref(false)
+const modelDiscoveryError = ref('')
+const modelApiKeyVisible = ref(false)
 const managedPresets = ref([])
 const defaultPresetId = ref('default-assistant')
 const selectedManagedPresetId = ref('')
@@ -414,6 +451,7 @@ const emptyModelDraft = () => ({
   model_name: '',
   base_url: '',
   api_key_env: '',
+  api_key: '',
   description: '',
   supports_stream: true,
   supports_tools: false,
@@ -656,6 +694,8 @@ function openItemDialog(name) {
 
 function closeItemDialog() {
   itemDialogOpen.value = ''
+  modelDiscoveryError.value = ''
+  modelDiscoveryLoading.value = false
 }
 
 async function ensureSidebarSession() {
@@ -698,28 +738,59 @@ async function setDefaultModel(modelId) {
 }
 
 async function testManagedModel(modelId) {
+  const model = managedModels.value.find(item => item.id === modelId)
+  const label = model?.display_name || modelId
+  modelTestStates[modelId] = {
+    status: 'running',
+    message: `${label} 正在测试连接...`,
+    at: new Date().toLocaleTimeString(),
+  }
+  configMessage.value = `正在测试 ${label}...`
   try {
     const result = await testChatModelConnection(modelId)
-    configMessage.value = result.message
+    const status = result.ok ? 'success' : 'error'
+    const at = new Date().toLocaleTimeString()
+    modelTestStates[modelId] = {
+      status,
+      message: `${result.message} · ${at}`,
+      at,
+    }
+    configMessage.value = `${label}：${result.message}（${at}）`
   } catch (err) {
-    configMessage.value = err?.message || '连接测试失败'
+    const at = new Date().toLocaleTimeString()
+    const message = err?.message || '连接测试失败'
+    modelTestStates[modelId] = {
+      status: 'error',
+      message: `${message} · ${at}`,
+      at,
+    }
+    configMessage.value = `${label}：${message}（${at}）`
   }
 }
 
 function resetModelDraft() {
   Object.assign(modelDraft, emptyModelDraft())
   editingModelId.value = ''
+  discoveredModelIds.value = []
+  modelDiscoveryManual.value = false
+  modelDiscoveryError.value = ''
+  modelApiKeyVisible.value = false
 }
 
 function editModelDraft(model) {
   editingModelId.value = model.id
   itemDialogOpen.value = 'model'
+  discoveredModelIds.value = []
+  modelDiscoveryManual.value = true
+  modelDiscoveryError.value = ''
+  modelApiKeyVisible.value = false
   Object.assign(modelDraft, {
     provider: model.provider || 'openai',
     display_name: model.display_name || '',
     model_name: model.model_name || '',
     base_url: model.base_url || '',
     api_key_env: '',
+    api_key: '',
     description: model.description || '',
     supports_stream: Boolean(model.supports_stream),
     supports_tools: Boolean(model.supports_tools),
@@ -728,12 +799,74 @@ function editModelDraft(model) {
   })
 }
 
+function inferProvider(baseUrl) {
+  const url = String(baseUrl || '').toLowerCase()
+  if (url.includes('deepseek')) return 'deepseek'
+  if (url.includes('dashscope') || url.includes('aliyun')) return 'qwen'
+  if (url.includes('bigmodel') || url.includes('zhipu')) return 'glm'
+  if (url.includes('moonshot')) return 'moonshot'
+  if (url.includes('localhost') || url.includes('127.0.0.1')) return 'ollama'
+  return 'openai'
+}
+
+function selectDiscoveredModel(modelId) {
+  modelDraft.model_name = modelId
+  if (!modelDraft.display_name) modelDraft.display_name = modelId
+}
+
+function toggleManualModelInput() {
+  modelDiscoveryManual.value = !modelDiscoveryManual.value
+  modelDiscoveryError.value = ''
+}
+
+async function fetchAvailableModels() {
+  modelDiscoveryError.value = ''
+  if (!modelDraft.base_url?.trim()) {
+    modelDiscoveryError.value = '请先填写 API Base URL'
+    return
+  }
+  if (!modelDraft.api_key?.trim()) {
+    modelDiscoveryError.value = '请先填写 API Key'
+    return
+  }
+  modelDiscoveryLoading.value = true
+  try {
+    const result = await discoverChatModels({
+      base_url: modelDraft.base_url.trim(),
+      api_key: modelDraft.api_key.trim(),
+    })
+    discoveredModelIds.value = result.models || []
+    modelDraft.base_url = result.base_url || modelDraft.base_url
+    modelDiscoveryManual.value = false
+    if (discoveredModelIds.value.length === 1) {
+      selectDiscoveredModel(discoveredModelIds.value[0])
+    }
+    if (!discoveredModelIds.value.length) {
+      modelDiscoveryError.value = '没有获取到可用模型，请手动填写模型 ID'
+      modelDiscoveryManual.value = true
+    }
+  } catch (err) {
+    discoveredModelIds.value = []
+    modelDiscoveryManual.value = true
+    modelDiscoveryError.value = err?.message || '获取可用模型失败，请手动填写模型 ID'
+  } finally {
+    modelDiscoveryLoading.value = false
+  }
+}
+
 async function saveModelDraft() {
+  if (!modelDraft.model_name?.trim()) {
+    configMessage.value = '请先选择或填写模型 ID'
+    return
+  }
+  if (!modelDraft.display_name?.trim()) {
+    modelDraft.display_name = modelDraft.model_name.trim()
+  }
   const payload = {
-    provider: modelDraft.provider,
-    display_name: modelDraft.display_name,
-    model_name: modelDraft.model_name,
-    base_url: modelDraft.base_url || null,
+    provider: inferProvider(modelDraft.base_url) || modelDraft.provider || 'openai',
+    display_name: modelDraft.display_name.trim(),
+    model_name: modelDraft.model_name.trim(),
+    base_url: modelDraft.base_url?.trim() || null,
     description: modelDraft.description || '',
     supports_stream: modelDraft.supports_stream,
     supports_tools: modelDraft.supports_tools,
@@ -742,6 +875,9 @@ async function saveModelDraft() {
   }
   if (!editingModelId.value || modelDraft.api_key_env) {
     payload.api_key_env = modelDraft.api_key_env || null
+  }
+  if (modelDraft.api_key?.trim()) {
+    payload.api_key = modelDraft.api_key.trim()
   }
   try {
     const model = editingModelId.value
@@ -1248,13 +1384,34 @@ onBeforeUnmount(() => {
 }
 
 .config-message {
-  margin: 10px 14px 0;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-  padding: 9px 12px;
-  color: #475569;
-  font-size: 12px;
+  position: relative;
+  margin: 12px 14px 0;
+  border: 1px solid rgba(16, 185, 129, 0.26);
+  border-left: 4px solid #10b981;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #ecfdf5 0%, #f8fafc 100%);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+  padding: 11px 14px 11px 36px;
+  color: #065f46;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.config-message::before {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: #10b981;
+  color: white;
+  content: "!";
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
 }
 
 .config-page-backdrop {
@@ -1390,6 +1547,22 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
 }
 
+.config-card.test-running {
+  border-color: rgba(59, 130, 246, 0.45);
+  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 46%);
+}
+
+.config-card.test-success {
+  border-color: rgba(16, 185, 129, 0.5);
+  background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 46%);
+  box-shadow: 0 16px 42px rgba(16, 185, 129, 0.12);
+}
+
+.config-card.test-error {
+  border-color: rgba(239, 68, 68, 0.46);
+  background: linear-gradient(180deg, #fef2f2 0%, #ffffff 46%);
+}
+
 .config-card header {
   display: flex;
   justify-content: space-between;
@@ -1458,6 +1631,42 @@ onBeforeUnmount(() => {
   font-size: 10px;
 }
 
+.model-test-chip {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.config-card.test-running .model-test-chip {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.config-card.test-success .model-test-chip {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.config-card.test-error .model-test-chip {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.model-test-chip strong {
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.model-test-chip span {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .config-card footer {
   display: flex;
   align-items: center;
@@ -1488,6 +1697,11 @@ onBeforeUnmount(() => {
   color: #0f172a;
 }
 
+.config-card footer button:disabled {
+  cursor: progress;
+  opacity: 0.54;
+}
+
 .config-card footer .text-danger {
   color: #dc2626;
 }
@@ -1506,13 +1720,13 @@ onBeforeUnmount(() => {
 
 .item-dialog {
   display: grid;
-  width: min(448px, 100%);
+  width: min(620px, 100%);
   max-height: min(86vh, 720px);
-  gap: 12px;
+  gap: 18px;
   overflow: auto;
-  border-radius: 16px;
+  border-radius: 22px;
   background: #ffffff;
-  padding: 24px;
+  padding: 28px;
   box-shadow: 0 28px 80px rgba(15, 23, 42, 0.32);
 }
 
@@ -1524,7 +1738,7 @@ onBeforeUnmount(() => {
 
 .item-dialog header strong {
   color: #0f172a;
-  font-size: 16px;
+  font-size: 24px;
   font-weight: 850;
 }
 
@@ -1541,31 +1755,77 @@ onBeforeUnmount(() => {
 
 .item-dialog label {
   display: grid;
-  gap: 5px;
-  color: #64748b;
-  font-size: 12px;
+  gap: 10px;
+  color: #334155;
+  font-size: 15px;
+  font-weight: 750;
 }
 
 .item-dialog input[type="text"],
+.item-dialog input[type="password"],
 .item-dialog textarea {
   width: 100%;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-  padding: 9px 11px;
+  border: 1px solid #d9dee6;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 14px 16px;
   color: #0f172a;
-  font-size: 13px;
+  font-size: 16px;
   outline: 0;
 }
 
 .item-dialog input[type="text"]:focus,
+.item-dialog input[type="password"]:focus,
 .item-dialog textarea:focus {
-  border-color: #cbd5e1;
+  border-color: #94a3b8;
   background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 }
 
 .item-dialog textarea {
   resize: vertical;
+}
+
+.secret-input-wrap {
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid #d9dee6;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.secret-input-wrap:focus-within {
+  border-color: #94a3b8;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+}
+
+.secret-input-wrap input[type="text"],
+.secret-input-wrap input[type="password"] {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.secret-input-wrap input[type="text"]:focus,
+.secret-input-wrap input[type="password"]:focus {
+  box-shadow: none;
+}
+
+.secret-input-wrap button {
+  border: 0;
+  border-left: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #047857;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.secret-input-wrap button:hover {
+  background: #ecfdf5;
 }
 
 .item-dialog-checks {
@@ -1580,14 +1840,98 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
+.model-discovery-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.model-discovery-actions button:first-child {
+  min-height: 48px;
+  border: 1px solid #d9dee6;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #0f172a;
+  padding: 0 18px;
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.model-discovery-actions button:first-child:hover:not(:disabled) {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.model-discovery-actions button:disabled {
+  cursor: progress;
+  opacity: 0.62;
+}
+
+.model-discovery-actions .link-button {
+  border: 0;
+  background: transparent;
+  color: #047857;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.model-discovery-error {
+  border: 1px solid rgba(245, 158, 11, 0.32);
+  border-radius: 12px;
+  background: #fffbeb;
+  padding: 10px 12px;
+  color: #92400e;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.model-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.model-picker > span {
+  color: #334155;
+  font-size: 15px;
+  font-weight: 750;
+}
+
+.model-picker > div {
+  display: grid;
+  max-height: 190px;
+  gap: 8px;
+  overflow: auto;
+  border: 1px solid #d9dee6;
+  border-radius: 12px;
+  padding: 8px;
+}
+
+.model-picker button {
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #334155;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 14px;
+}
+
+.model-picker button:hover,
+.model-picker button.selected {
+  background: #ecfdf5;
+  color: #047857;
+  font-weight: 750;
+}
+
 .item-dialog-save {
-  min-height: 40px;
+  justify-self: start;
+  min-height: 50px;
   border: 0;
   border-radius: 12px;
-  background: #047857;
+  background: #86b7ad;
   color: white;
-  padding: 0 16px;
-  font-size: 14px;
+  padding: 0 20px;
+  font-size: 16px;
   font-weight: 750;
 }
 

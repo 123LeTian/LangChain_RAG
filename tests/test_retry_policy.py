@@ -113,6 +113,33 @@ class FailingRAGService:
         raise TimeoutError("slow")
 
 
+def _test_model_registry(tmp_path) -> ModelRegistry:
+    config_path = tmp_path / "models.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "models:",
+                "  - id: local-test",
+                "    provider: local",
+                "    display_name: Local Test",
+                "    model_name: local-test",
+                "    base_url: null",
+                "    api_key_env: null",
+                "    description: Test-only non-mock model.",
+                "    supports_stream: true",
+                "    enabled: true",
+                "    is_default: true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return ModelRegistry(
+        config_path,
+        custom_path=tmp_path / "custom_models.json",
+        secret_path=tmp_path / ".env.test",
+    )
+
+
 def _read_sse(response) -> List[Dict[str, Any]]:
     events = []
     for line in response.iter_lines():
@@ -138,7 +165,7 @@ def test_failed_chat_stream_keeps_user_message(tmp_path):
         message_service,
         MemoryService(message_service),
         gateway,
-        ModelRegistry(),
+        _test_model_registry(tmp_path),
     )
 
     app.dependency_overrides[get_chat_session_service] = lambda: session_service

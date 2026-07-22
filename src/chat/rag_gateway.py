@@ -61,6 +61,16 @@ class RAGGateway:
                     yield event
                 return
 
+            if self._is_model_identity_question(original_question):
+                async for event in self._stream_model_identity(
+                    model_id=model_id,
+                    model_config=model_config,
+                    request_id=request_id,
+                    started_at=started_at,
+                ):
+                    yield event
+                return
+
             self._validate_model_for_real_rag(model_config)
             request = self._build_request(
                 session_id=session_id,
@@ -260,6 +270,66 @@ class RAGGateway:
 
     def _is_mock_model(self, model_config: Optional[Any]) -> bool:
         return str(getattr(model_config, "provider", "") or "").lower() == "mock"
+
+    def _is_model_identity_question(self, question: str) -> bool:
+        text = (question or "").strip().lower().replace("？", "?")
+        compact = "".join(text.split())
+        if not compact:
+            return False
+        identity_patterns = (
+            "你是什么模型",
+            "你是哪个模型",
+            "你用的什么模型",
+            "现在是什么模型",
+            "当前是什么模型",
+            "当前模型",
+            "什么模型",
+            "whichmodel",
+            "whatmodel",
+            "modelareyou",
+        )
+        return len(compact) <= 40 and any(pattern in compact for pattern in identity_patterns)
+
+    async def _stream_model_identity(
+        self,
+        *,
+        model_id: Optional[str],
+        model_config: Optional[Any],
+        request_id: Optional[str],
+        started_at: float,
+    ) -> AsyncIterator[ChatStreamEvent]:
+        provider = getattr(model_config, "provider", None) or "default"
+        model_name = getattr(model_config, "model_name", None) or model_id or "default"
+        display_name = getattr(model_config, "display_name", None) or model_id or model_name
+        answer = (
+            f"当前会话正在使用 {display_name}。"
+            f"模型 ID：{model_id or model_name}；Provider：{provider}；Model Name：{model_name}。"
+        )
+        trace = [{
+            "stage": "model",
+            "duration_ms": 0,
+            "input_summary": "model identity question",
+            "output_summary": f"Answered from current chat model config: {model_id or model_name}",
+            "metadata": {
+                "model_id": model_id or model_name,
+                "provider": provider,
+                "model_name": model_name,
+            },
+        }]
+        yield {"type": "trace", "trace": trace}
+        yield {"type": "chunk", "content": answer}
+        yield {
+            "type": "done",
+            "content": answer,
+            "citations": [],
+            "trace": trace,
+            "latency_ms": int((time.monotonic() - started_at) * 1000),
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "model_id": model_id or model_name,
+            "request_id": request_id,
+            "retry_count": 0,
+        }
 
     async def _stream_mock_model(
         self,

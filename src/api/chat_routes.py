@@ -25,6 +25,7 @@ from src.chat.schemas import (
     ChatExportResponse,
     ChatModelCreate,
     ChatModelDefaultUpdate,
+    ChatModelDiscoverRequest,
     ChatModelUpdate,
     ChatPresetCreate,
     ChatPresetUpdate,
@@ -75,6 +76,17 @@ async def create_model(
 ) -> dict:
     try:
         return registry.create_model(request).public_dict()
+    except ValueError as exc:
+        raise ValidationError(str(exc))
+
+
+@router.post("/models/discover")
+async def discover_models(
+    request: ChatModelDiscoverRequest,
+    registry: ModelRegistryDep = None,  # type: ignore
+) -> dict:
+    try:
+        return registry.discover_model_ids(request.base_url, request.api_key)
     except ValueError as exc:
         raise ValidationError(str(exc))
 

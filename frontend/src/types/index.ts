@@ -300,16 +300,22 @@ export interface ChatModelsResponse {
 }
 
 export interface ChatModelPayload {
-  provider: string
+  provider?: string
   display_name: string
   model_name: string
   base_url?: string | null
   api_key_env?: string | null
+  api_key?: string | null
   description?: string
   supports_stream?: boolean
   supports_tools?: boolean
   supports_vision?: boolean
   enabled?: boolean
+}
+
+export interface ChatModelDiscoveryResponse {
+  models: string[]
+  base_url: string
 }
 
 export interface ChatModelConnectionResult {
