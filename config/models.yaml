@@ -1,0 +1,60 @@
+models:
+  - id: deepseek-chat
+    provider: deepseek
+    display_name: DeepSeek Chat
+    model_name: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    supports_stream: true
+    supports_tools: false
+    supports_vision: false
+    enabled: true
+    is_default: true
+
+  - id: deepseek-reasoner
+    provider: deepseek
+    display_name: DeepSeek Reasoner
+    model_name: deepseek-reasoner
+    base_url: https://api.deepseek.com/v1
+    api_key_env: DEEPSEEK_API_KEY
+    supports_stream: true
+    supports_tools: false
+    supports_vision: false
+    enabled: true
+    is_default: false
+
+  - id: gpt-4o
+    provider: openai
+    display_name: GPT-4o
+    model_name: gpt-4o
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    supports_stream: true
+    supports_tools: true
+    supports_vision: true
+    enabled: false
+    is_default: false
+
+  - id: qwen-plus
+    provider: qwen
+    display_name: Qwen Plus
+    model_name: qwen-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    supports_stream: true
+    supports_tools: true
+    supports_vision: false
+    enabled: false
+    is_default: false
+
+  - id: ollama-qwen
+    provider: ollama
+    display_name: Local Qwen
+    model_name: qwen2.5
+    base_url: http://localhost:11434/v1
+    api_key_env: null
+    supports_stream: true
+    supports_tools: false
+    supports_vision: false
+    enabled: false
+    is_default: false

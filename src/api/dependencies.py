@@ -11,6 +11,21 @@ from typing import Annotated, Any
 
 from fastapi import Depends
 
+from src.chat.chat_application_service import ChatApplicationService
+from src.chat.message_service import MessageService
+from src.chat.memory_service import MemoryService
+from src.chat.model_registry import ModelRegistry
+from src.chat.preset_service import PresetService
+from src.chat.rag_gateway import RAGGateway
+from src.chat.export_service import ExportService
+from src.chat.search_service import SearchService
+from src.chat.session_service import SessionService
+from src.chat.token_service import TokenService
+from src.chat.retry_policy import RetryPolicy
+from src.chat.structured_logger import StructuredLogger
+from src.chat_storage.sqlite_chat_store import SQLiteChatStore
+from src.config.runtime_config import get_runtime_config
+
 
 # ============================================================================
 # 知识库服务（桩）
@@ -80,6 +95,36 @@ _rag_service = RAGService()
 _graph_repo = GraphRepository()
 _trace_repo = TraceRepository()
 _eval_runner = EvaluationRunner()
+_runtime_config = get_runtime_config()
+_chat_store = SQLiteChatStore(_runtime_config.chat_db_path)
+_chat_session_service = SessionService(_chat_store)
+_chat_message_service = MessageService(_chat_store)
+_chat_memory_service = MemoryService(_chat_message_service)
+_model_registry = ModelRegistry(_runtime_config.model_config_path)
+_preset_service = PresetService(_chat_store)
+_chat_search_service = SearchService(_chat_store)
+_chat_token_service = TokenService(_chat_store)
+_chat_export_service = ExportService(
+    _chat_session_service,
+    _chat_message_service,
+    _chat_token_service,
+)
+_structured_logger = StructuredLogger()
+_retry_policy = RetryPolicy(
+    timeout_seconds=_runtime_config.retry_timeout_seconds,
+    max_retries=_runtime_config.retry_max_retries,
+    backoff_seconds=_runtime_config.retry_backoff_seconds,
+)
+_chat_rag_gateway = RAGGateway(_rag_service, retry_policy=_retry_policy, logger=_structured_logger)
+_chat_application_service = ChatApplicationService(
+    _chat_session_service,
+    _chat_message_service,
+    _chat_memory_service,
+    _chat_rag_gateway,
+    _model_registry,
+    _preset_service,
+    _structured_logger,
+)
 
 
 async def get_knowledge_service() -> KnowledgeService:
@@ -102,6 +147,38 @@ async def get_eval_runner() -> EvaluationRunner:
     return _eval_runner
 
 
+async def get_chat_session_service() -> SessionService:
+    return _chat_session_service
+
+
+async def get_chat_message_service() -> MessageService:
+    return _chat_message_service
+
+
+async def get_chat_application_service() -> ChatApplicationService:
+    return _chat_application_service
+
+
+async def get_model_registry() -> ModelRegistry:
+    return _model_registry
+
+
+async def get_preset_service() -> PresetService:
+    return _preset_service
+
+
+async def get_chat_search_service() -> SearchService:
+    return _chat_search_service
+
+
+async def get_chat_token_service() -> TokenService:
+    return _chat_token_service
+
+
+async def get_chat_export_service() -> ExportService:
+    return _chat_export_service
+
+
 # ============================================================================
 # 类型别名
 # ============================================================================
@@ -111,3 +188,14 @@ RAGServiceDep = Annotated[RAGService, Depends(get_rag_service)]
 GraphRepoDep = Annotated[GraphRepository, Depends(get_graph_repo)]
 TraceRepoDep = Annotated[TraceRepository, Depends(get_trace_repo)]
 EvalRunnerDep = Annotated[EvaluationRunner, Depends(get_eval_runner)]
+ChatSessionServiceDep = Annotated[SessionService, Depends(get_chat_session_service)]
+ChatMessageServiceDep = Annotated[MessageService, Depends(get_chat_message_service)]
+ChatApplicationServiceDep = Annotated[
+    ChatApplicationService,
+    Depends(get_chat_application_service),
+]
+ModelRegistryDep = Annotated[ModelRegistry, Depends(get_model_registry)]
+PresetServiceDep = Annotated[PresetService, Depends(get_preset_service)]
+ChatSearchServiceDep = Annotated[SearchService, Depends(get_chat_search_service)]
+ChatTokenServiceDep = Annotated[TokenService, Depends(get_chat_token_service)]
+ChatExportServiceDep = Annotated[ExportService, Depends(get_chat_export_service)]
