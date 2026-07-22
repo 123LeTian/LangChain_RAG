@@ -1,0 +1,17 @@
+storage:
+  chat_db_path: data/prod/chat/chat.db
+  knowledge_dir: data/prod/knowledge
+  vector_dir: data/prod/vector
+  export_dir: data/prod/exports
+
+logging:
+  app_log_path: logs/prod/app.jsonl
+  error_log_path: logs/prod/error.jsonl
+  build_log_dir: logs/prod/build
+
+models:
+  config_path: config/models.yaml
+
+database:
+  type: sqlite
+  url_env: DATABASE_URL

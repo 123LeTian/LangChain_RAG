@@ -32,6 +32,7 @@ htmlcov/
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 # OS
 .DS_Store
@@ -58,3 +59,4 @@ chroma.sqlite3
 
 # Runtime data (KB persistence)
 data/
+logs/

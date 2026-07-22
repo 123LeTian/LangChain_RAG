@@ -96,6 +96,13 @@ def _safe_filename(filename: str) -> str:
     return safe or f"upload_{uuid.uuid4().hex[:8]}"
 
 
+def _find_document(kb_id: str, doc_id: str) -> dict | None:
+    for doc in _MOCK_DOCS:
+        if doc["kb_id"] == kb_id and doc["id"] == doc_id:
+            return doc
+    return None
+
+
 # ============================================================================
 # Knowledge base CRUD
 # ============================================================================
@@ -157,8 +164,11 @@ async def upload_document(
 ) -> dict:
     print(f"[KB] Upload start: kb={kb_id}, file={file.filename}", flush=True)
 
+    if not any(kb["id"] == kb_id for kb in _MOCK_KBS):
+        raise NotFoundError(f"KB {kb_id} not found")
+
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else ""
-    allowed = {"pdf", "docx", "txt", "md"}
+    allowed = {"pdf", "docx", "txt", "md", "markdown"}
     if ext not in allowed:
         raise ValidationError(f"Unsupported format: .{ext}")
 
@@ -220,6 +230,43 @@ async def list_documents(
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> list[dict]:
     return [d for d in _MOCK_DOCS if d["kb_id"] == kb_id]
+
+
+@router.get("/{kb_id}/documents/{doc_id}/preview")
+async def preview_document(
+    kb_id: str,
+    doc_id: str,
+    service: KnowledgeServiceDep = None,  # type: ignore
+) -> dict:
+    doc = _find_document(kb_id, doc_id)
+    if not doc:
+        raise NotFoundError(f"Document {doc_id} not found")
+
+    fpath = _PROJECT_ROOT / "documents" / doc["filename"]
+    if not fpath.exists():
+        raise NotFoundError(f"Document file {doc['filename']} not found")
+
+    try:
+        from src.ingestion import LoaderFactory
+
+        loaded = LoaderFactory.load(fpath, kb_id=kb_id, document_id=doc_id)
+        text = getattr(loaded, "text", "") or ""
+        metadata = getattr(loaded, "metadata", {}) or {}
+    except Exception as exc:
+        raise ValidationError(f"Document preview failed: {type(exc).__name__}: {exc}")
+
+    max_chars = 20000
+    preview_text = text[:max_chars]
+    return {
+        "id": doc_id,
+        "kb_id": kb_id,
+        "filename": doc["filename"],
+        "type": doc.get("type") or fpath.suffix.lstrip("."),
+        "size_bytes": doc.get("size_bytes", fpath.stat().st_size),
+        "text": preview_text,
+        "truncated": len(text) > max_chars,
+        "metadata": metadata,
+    }
 
 
 @router.delete("/{kb_id}/documents/{doc_id}", status_code=204)

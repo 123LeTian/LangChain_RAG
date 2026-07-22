@@ -74,7 +74,7 @@ export interface TraceEvent {
 
 export type KBStatus = 'creating' | 'ready' | 'indexing' | 'error'
 export type DocStatus = 'uploaded' | 'parsing' | 'chunking' | 'indexed' | 'error'
-export type DocType = 'txt' | 'md' | 'pdf' | 'docx'
+export type DocType = 'txt' | 'md' | 'markdown' | 'pdf' | 'docx'
 
 export interface KnowledgeBase {
   id: string
@@ -97,6 +97,17 @@ export interface DocumentRecord {
   status: DocStatus
   chunk_count: number
   size_bytes: number
+}
+
+export interface DocumentPreview {
+  id: string
+  kb_id: string
+  filename: string
+  type: DocType
+  size_bytes: number
+  text: string
+  truncated: boolean
+  metadata: Record<string, any>
 }
 
 // ========== 图谱 ==========
@@ -129,6 +140,18 @@ export interface GraphData {
   links: GraphLink[]
   communities: Community[]
   hit_path: string[]
+  model?: Partial<ChatModel>
+  build?: {
+    mode: string
+    model_id: string
+    entity_count: number
+    relationship_count: number
+    community_count: number
+    report_count: number
+    duration_ms: number
+    warnings: string[]
+  }
+  metadata?: Record<string, any>
 }
 
 // ========== 评测 ==========
@@ -172,3 +195,174 @@ export interface SSEDone {
   citations: Citation[]
   usage: Record<string, any>
 }
+
+// ========== Chat Session ==========
+
+export interface ChatSession {
+  id: string
+  title: string
+  model_id?: string | null
+  preset_id?: string | null
+  rag_mode?: string | null
+  knowledge_base_id?: string | null
+  total_prompt_tokens: number
+  total_completion_tokens: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatMessage {
+  id: string
+  session_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  citations?: any[] | null
+  trace?: any[] | null
+  prompt_tokens: number
+  completion_tokens: number
+  latency_ms?: number | null
+  created_at: string
+}
+
+export interface ChatStreamRequest {
+  question: string
+  rag_mode?: string | null
+  knowledge_base_id?: string | null
+  model_id?: string | null
+  preset_id?: string | null
+  top_k?: number | null
+  rerank_top_k?: number | null
+  score_threshold?: number | null
+  temperature?: number | null
+  rewrite_enabled?: boolean | null
+  retrieve_enabled?: boolean | null
+  rerank_enabled?: boolean | null
+  compress_enabled?: boolean | null
+  verify_enabled?: boolean | null
+}
+
+export interface ChatPreset {
+  id: string
+  name: string
+  description: string
+  owner_type: 'system' | 'user'
+  is_default: boolean
+  system_prompt?: string
+  rag_prompt_hint?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface ChatPresetsResponse {
+  presets: ChatPreset[]
+  default_preset_id: string
+}
+
+export interface ChatSearchItem {
+  session_id: string
+  session_title: string
+  message_id: string
+  role: 'user' | 'assistant' | 'system'
+  snippet: string
+  created_at: string
+}
+
+export interface ChatSearchResponse {
+  items: ChatSearchItem[]
+  total: number
+}
+
+export interface ChatStats {
+  sessions_count: number
+  messages_count: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+}
+
+export interface ChatSessionStats {
+  session_id: string
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  messages_count: number
+}
+
+export interface ChatExportResponse {
+  filename: string
+  content: string
+}
+
+export interface ChatModel {
+  id: string
+  provider: string
+  display_name: string
+  model_name: string
+  base_url?: string | null
+  description?: string
+  supports_stream: boolean
+  supports_tools: boolean
+  supports_vision: boolean
+  enabled: boolean
+  is_default: boolean
+  is_builtin: boolean
+  key_required: boolean
+  key_configured: boolean
+  key_scope: 'independent' | 'not_required'
+}
+
+export interface ChatModelsResponse {
+  models: ChatModel[]
+  default_model_id: string
+  key_metrics?: {
+    configured: number
+    required: number
+    missing: number
+    independent: number
+  }
+}
+
+export interface ChatModelPayload {
+  provider?: string
+  display_name: string
+  model_name: string
+  base_url?: string | null
+  api_key_env?: string | null
+  api_key?: string | null
+  description?: string
+  supports_stream?: boolean
+  supports_tools?: boolean
+  supports_vision?: boolean
+  enabled?: boolean
+}
+
+export interface ChatModelDiscoveryResponse {
+  models: string[]
+  base_url: string
+}
+
+export interface ChatModelConnectionResult {
+  ok: boolean
+  message: string
+  model_id: string
+}
+
+export type ChatStreamEvent =
+  | { type: 'chunk'; content: string }
+  | { type: 'trace'; trace: any[] }
+  | { type: 'citation'; citations: any[] }
+  | {
+      type: 'done'
+      message_id: string
+      session_id: string
+      content: string
+      citations: any[]
+      trace: any[]
+      latency_ms: number
+      prompt_tokens: number
+      completion_tokens: number
+      model_id?: string | null
+      request_id?: string | null
+      retry_count?: number
+    }
+  | { type: 'error'; message: string; request_id?: string | null; retry_count?: number }

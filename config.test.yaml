@@ -1,0 +1,13 @@
+storage:
+  chat_db_path: data/test/chat/chat.db
+  knowledge_dir: data/test/knowledge
+  vector_dir: data/test/vector
+  export_dir: data/test/exports
+
+logging:
+  app_log_path: logs/test/app.jsonl
+  error_log_path: logs/test/error.jsonl
+  build_log_dir: logs/test/build
+
+models:
+  config_path: config/models.yaml

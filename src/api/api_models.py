@@ -75,6 +75,7 @@ class DocumentType(str, Enum):
     DOCX = "docx"
     TXT = "txt"
     MD = "md"
+    MARKDOWN = "markdown"
 
 
 class DocumentStatus(str, Enum):
