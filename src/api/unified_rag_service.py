@@ -31,6 +31,13 @@ from src.api.api_models import (
     TraceEvent,
     TraceStage,
 )
+from src.api.document_store import (
+    apply_document_metadata,
+    document_display_filename,
+    iter_supported_document_files,
+    relative_storage_path,
+    resolve_document_path,
+)
 
 
 def _load_env():
@@ -118,11 +125,10 @@ def _load_document_specs(project_root: Path, docs_dir: Path) -> list[dict[str, A
         for index, record in enumerate(data.get("docs") or []):
             if not isinstance(record, dict):
                 continue
-            filename = str(record.get("filename") or "").strip()
             kb_id = str(record.get("kb_id") or "").strip()
-            if not filename or not kb_id:
+            if not kb_id:
                 continue
-            path = docs_dir / filename
+            path = resolve_document_path(record, project_root=project_root, docs_dir=docs_dir)
             if not path.exists():
                 continue
             specs.append(
@@ -130,17 +136,27 @@ def _load_document_specs(project_root: Path, docs_dir: Path) -> list[dict[str, A
                     "path": path,
                     "kb_id": kb_id,
                     "document_id": str(record.get("id") or f"doc-{index:03d}"),
+                    "filename": document_display_filename(record, path),
+                    "storage_path": str(
+                        record.get("storage_path")
+                        or relative_storage_path(path, docs_dir=docs_dir)
+                    ),
+                    "record": record,
                 }
             )
     if specs:
         return specs
 
-    supported = [".txt", ".md", ".markdown", ".pdf", ".docx"]
-    files = []
-    for ext in supported:
-        files.extend(docs_dir.glob(f"**/*{ext}"))
+    files = iter_supported_document_files(docs_dir)
     return [
-        {"path": path, "kb_id": "default", "document_id": f"doc-{index:03d}"}
+        {
+            "path": path,
+            "kb_id": "default",
+            "document_id": f"doc-{index:03d}",
+            "filename": path.name,
+            "storage_path": relative_storage_path(path, docs_dir=docs_dir),
+            "record": {"filename": path.name},
+        }
         for index, path in enumerate(files)
     ]
 
@@ -249,9 +265,15 @@ class UnifiedRAGApiService:
                     kb_id=spec["kb_id"],
                     document_id=spec["document_id"],
                 )
+                doc = apply_document_metadata(
+                    doc,
+                    spec.get("record") or spec,
+                    fpath,
+                    docs_dir=docs_dir,
+                )
                 documents.append(doc)
                 print(
-                    f"[UnifiedRAG]   Loaded: {fpath.name} "
+                    f"[UnifiedRAG]   Loaded: {spec.get('filename') or fpath.name} "
                     f"(kb={spec['kb_id']}, {len(doc.text)} chars)",
                     flush=True,
                 )

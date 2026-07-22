@@ -352,13 +352,48 @@ class TestKnowledgeBaseIsolation:
 
         specs = _load_document_specs(tmp_path, docs_dir)
 
-        assert specs == [
-            {
-                "path": docs_dir / "星河计划.txt",
-                "kb_id": "kb_star",
-                "document_id": "doc_star",
-            }
-        ]
+        assert len(specs) == 1
+        assert specs[0]["path"] == docs_dir / "星河计划.txt"
+        assert specs[0]["kb_id"] == "kb_star"
+        assert specs[0]["document_id"] == "doc_star"
+        assert specs[0]["filename"] == "星河计划.txt"
+
+    def test_document_specs_prefer_storage_path_for_same_filename(self, tmp_path):
+        from src.api.unified_rag_service import _load_document_specs
+
+        docs_dir = tmp_path / "documents"
+        data_dir = tmp_path / "data"
+        docs_dir.mkdir()
+        data_dir.mkdir()
+        (docs_dir / "kb_alpha").mkdir()
+        (docs_dir / "kb_beta").mkdir()
+        (docs_dir / "kb_alpha" / "doc_alpha__plan.txt").write_text(
+            "owner: Alice", encoding="utf-8"
+        )
+        (docs_dir / "kb_beta" / "doc_beta__plan.txt").write_text(
+            "owner: Bob", encoding="utf-8"
+        )
+        (data_dir / "knowledge_bases.json").write_text(
+            (
+                '{"kbs":[{"id":"kb_alpha","name":"A"},{"id":"kb_beta","name":"B"}],'
+                '"docs":['
+                '{"id":"doc_alpha","kb_id":"kb_alpha","filename":"plan.txt",'
+                '"storage_path":"kb_alpha/doc_alpha__plan.txt"},'
+                '{"id":"doc_beta","kb_id":"kb_beta","filename":"plan.txt",'
+                '"storage_path":"kb_beta/doc_beta__plan.txt"}]}'
+            ),
+            encoding="utf-8",
+        )
+
+        specs = _load_document_specs(tmp_path, docs_dir)
+
+        by_doc = {spec["document_id"]: spec for spec in specs}
+        assert by_doc["doc_alpha"]["path"] == docs_dir / "kb_alpha" / "doc_alpha__plan.txt"
+        assert by_doc["doc_alpha"]["kb_id"] == "kb_alpha"
+        assert by_doc["doc_alpha"]["filename"] == "plan.txt"
+        assert by_doc["doc_beta"]["path"] == docs_dir / "kb_beta" / "doc_beta__plan.txt"
+        assert by_doc["doc_beta"]["kb_id"] == "kb_beta"
+        assert by_doc["doc_beta"]["filename"] == "plan.txt"
 
     def test_modular_retrieve_passes_current_kb_id_to_search(self):
         from src.models.rag import RAGContext

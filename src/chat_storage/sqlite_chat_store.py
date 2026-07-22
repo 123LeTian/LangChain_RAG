@@ -231,7 +231,7 @@ class SQLiteChatStore:
                 """
                 SELECT * FROM chat_messages
                 WHERE session_id = ?
-                ORDER BY created_at ASC, id ASC
+                ORDER BY created_at ASC, rowid ASC
                 """,
                 (session_id,),
             ).fetchall()

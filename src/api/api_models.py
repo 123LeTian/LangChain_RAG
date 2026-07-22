@@ -100,6 +100,7 @@ class DocumentRecord(BaseModel):
     id: str = Field(default_factory=lambda: f"doc_{uuid.uuid4().hex[:8]}")
     kb_id: str
     filename: str
+    storage_path: str = Field(default="", description="Relative path under documents/")
     type: DocumentType
     checksum: str = ""
     status: DocumentStatus = DocumentStatus.UPLOADED

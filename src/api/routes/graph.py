@@ -10,6 +10,7 @@ from typing import Any, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
+from src.api.document_store import apply_document_metadata
 from src.api.dependencies import GraphRepoDep, ModelRegistryDep
 from src.api.errors import NotFoundError, ValidationError
 from src.api.graph_model_extractor import LLMGraphExtractor
@@ -92,17 +93,18 @@ def _load_graph_chunks(kb_id: str) -> list[ChunkRecord]:
     from src.ingestion.splitter import split_documents
 
     loaded_docs = []
-    docs_dir = knowledge._PROJECT_ROOT / "documents"
+    docs_dir = knowledge._documents_root()
     for doc in docs:
-        path = docs_dir / str(doc.get("filename") or "")
+        path = knowledge._document_path(doc)
         if not path.exists():
             continue
+        loaded = LoaderFactory.load(
+            path,
+            kb_id=kb_id,
+            document_id=str(doc.get("id") or path.stem),
+        )
         loaded_docs.append(
-            LoaderFactory.load(
-                path,
-                kb_id=kb_id,
-                document_id=str(doc.get("id") or path.stem),
-            )
+            apply_document_metadata(loaded, doc, path, docs_dir=docs_dir)
         )
 
     chunks = []

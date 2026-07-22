@@ -1,20 +1,27 @@
 """
 Knowledge Routes — Knowledge base CRUD, document upload, index management.
 Knowledge bases are persisted to a JSON file so they survive restarts.
-Uploaded files are saved to documents/ and trigger RAG index rebuild.
+Uploaded files are saved under documents/<kb_id>/ and trigger RAG index rebuild.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
 import time
 import uuid
 
 from fastapi import APIRouter, File, Form, UploadFile
 from pathlib import Path
 
+from src.api.document_store import (
+    SUPPORTED_DOCUMENT_SUFFIXES,
+    apply_document_metadata,
+    document_storage_relative_path,
+    documents_root,
+    file_checksum,
+    resolve_document_path,
+    safe_filename as _store_safe_filename,
+)
 from src.api.dependencies import KnowledgeServiceDep
 from src.api.errors import NotFoundError, ValidationError
 from src.api.api_models import (
@@ -91,9 +98,63 @@ def _make_kb(kb_id: str, name: str, description: str = "", status: str = "ready"
 
 
 def _safe_filename(filename: str) -> str:
-    safe = re.sub(r'[^\w\u4e00-\u9fff.\-]', '_', filename)
-    safe = safe.replace('..', '_')
-    return safe or f"upload_{uuid.uuid4().hex[:8]}"
+    return _store_safe_filename(filename) or f"upload_{uuid.uuid4().hex[:8]}"
+
+
+def _documents_root() -> Path:
+    return documents_root(_PROJECT_ROOT)
+
+
+def _document_path(doc: dict) -> Path:
+    return resolve_document_path(doc, project_root=_PROJECT_ROOT)
+
+
+def _path_key(path: Path) -> str:
+    return str(path.resolve()).casefold()
+
+
+def _storage_path_referenced(path: Path) -> bool:
+    key = _path_key(path)
+    for doc in _MOCK_DOCS:
+        try:
+            if _path_key(_document_path(doc)) == key:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _delete_file_if_unreferenced(doc: dict) -> None:
+    path = _document_path(doc)
+    if not path.exists() or _storage_path_referenced(path):
+        return
+    try:
+        path.unlink()
+        print(f"[KB] Deleted file: {path}", flush=True)
+        _remove_empty_parent_dirs(path)
+    except Exception as exc:
+        print(f"[KB] Delete file skipped: {path}: {exc}", flush=True)
+
+
+def _remove_empty_parent_dirs(path: Path) -> None:
+    root = _documents_root().resolve()
+    parent = path.parent.resolve()
+    while parent != root and root in parent.parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def _trigger_rag_rebuild() -> None:
+    try:
+        from src.api.dependencies import _rag_service
+        if hasattr(_rag_service, '_real'):
+            _rag_service._real._initialized = False
+            print("[KB] RAG index will rebuild on next query", flush=True)
+    except Exception as e:
+        print(f"[KB] RAG rebuild trigger failed: {e}", flush=True)
 
 
 def _find_document(kb_id: str, doc_id: str) -> dict | None:
@@ -104,9 +165,9 @@ def _find_document(kb_id: str, doc_id: str) -> dict | None:
 
 
 def _document_chunk_count(doc: dict) -> int:
-    fpath = _PROJECT_ROOT / "documents" / str(doc.get("filename") or "")
+    fpath = _document_path(doc)
     if not fpath.exists():
-        return int(doc.get("chunk_count") or 0)
+        return 0
     try:
         from src.ingestion import LoaderFactory
         from src.ingestion.splitter import split_documents
@@ -116,6 +177,7 @@ def _document_chunk_count(doc: dict) -> int:
             kb_id=str(doc.get("kb_id") or ""),
             document_id=str(doc.get("id") or fpath.stem),
         )
+        loaded = apply_document_metadata(loaded, doc, fpath, docs_dir=_documents_root())
         return len(split_documents(loaded, chunk_size=1500, chunk_overlap=300))
     except Exception:
         return int(doc.get("chunk_count") or 0)
@@ -190,9 +252,16 @@ async def delete_knowledge_base(
     kb_id: str,
     service: KnowledgeServiceDep = None,  # type: ignore
 ):
-    global _MOCK_KBS
+    global _MOCK_KBS, _MOCK_DOCS
+    if not any(kb["id"] == kb_id for kb in _MOCK_KBS):
+        raise NotFoundError(f"KB {kb_id} not found")
+    docs_to_delete = [doc for doc in _MOCK_DOCS if doc.get("kb_id") == kb_id]
     _MOCK_KBS = [kb for kb in _MOCK_KBS if kb["id"] != kb_id]
+    _MOCK_DOCS = [doc for doc in _MOCK_DOCS if doc.get("kb_id") != kb_id]
+    for doc in docs_to_delete:
+        _delete_file_if_unreferenced(doc)
     _persist()
+    _trigger_rag_rebuild()
     return None
 
 
@@ -212,17 +281,19 @@ async def upload_document(
         raise NotFoundError(f"KB {kb_id} not found")
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename and "." in file.filename else ""
-    allowed = {"pdf", "docx", "txt", "md", "markdown"}
-    if ext not in allowed:
+    if f".{ext}" not in SUPPORTED_DOCUMENT_SUFFIXES:
         raise ValidationError(f"Unsupported format: .{ext}")
 
     content = await file.read()
     print(f"[KB] Read {len(content)} bytes from upload", flush=True)
 
+    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     safe_name = _safe_filename(file.filename or f"upload.{ext}")
-    docs_dir = _PROJECT_ROOT / "documents"
-    docs_dir.mkdir(exist_ok=True)
-    save_path = docs_dir / safe_name
+    docs_dir = _documents_root()
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = document_storage_relative_path(kb_id, doc_id, safe_name)
+    save_path = docs_dir / storage_path
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         with open(save_path, "wb") as f:
@@ -235,13 +306,13 @@ async def upload_document(
     if not save_path.exists():
         raise ValidationError("File save verification failed")
 
-    doc_id = f"doc_{uuid.uuid4().hex[:8]}"
     doc = {
         "id": doc_id,
         "kb_id": kb_id,
         "filename": safe_name,
+        "storage_path": storage_path,
         "type": ext,
-        "checksum": f"mock_{uuid.uuid4().hex[:8]}",
+        "checksum": file_checksum(content),
         "status": "indexed",
         "chunk_count": 0,
         "size_bytes": len(content),
@@ -254,13 +325,7 @@ async def upload_document(
     _persist()
 
     # Trigger RAG index rebuild
-    try:
-        from src.api.dependencies import _rag_service
-        if hasattr(_rag_service, '_real'):
-            _rag_service._real._initialized = False
-            print(f"[KB] RAG index will rebuild on next query", flush=True)
-    except Exception as e:
-        print(f"[KB] RAG rebuild trigger failed: {e}", flush=True)
+    _trigger_rag_rebuild()
 
     print(f"[KB] Upload complete: {safe_name} ({len(content)} bytes)", flush=True)
     return doc
@@ -284,7 +349,7 @@ async def preview_document(
     if not doc:
         raise NotFoundError(f"Document {doc_id} not found")
 
-    fpath = _PROJECT_ROOT / "documents" / doc["filename"]
+    fpath = _document_path(doc)
     if not fpath.exists():
         raise NotFoundError(f"Document file {doc['filename']} not found")
 
@@ -292,6 +357,7 @@ async def preview_document(
         from src.ingestion import LoaderFactory
 
         loaded = LoaderFactory.load(fpath, kb_id=kb_id, document_id=doc_id)
+        loaded = apply_document_metadata(loaded, doc, fpath, docs_dir=_documents_root())
         text = getattr(loaded, "text", "") or ""
         metadata = getattr(loaded, "metadata", {}) or {}
     except Exception as exc:
@@ -318,19 +384,14 @@ async def delete_document(
     service: KnowledgeServiceDep = None,  # type: ignore
 ):
     global _MOCK_DOCS
-    for d in _MOCK_DOCS:
-        if d["id"] == doc_id and d["kb_id"] == kb_id:
-            try:
-                fpath = _PROJECT_ROOT / "documents" / d["filename"]
-                if fpath.exists():
-                    fpath.unlink()
-                    print(f"[KB] Deleted file: {fpath}", flush=True)
-            except Exception:
-                pass
-            break
+    doc = _find_document(kb_id, doc_id)
+    if not doc:
+        raise NotFoundError(f"Document {doc_id} not found")
     _MOCK_DOCS = [d for d in _MOCK_DOCS if not (d["id"] == doc_id and d["kb_id"] == kb_id)]
+    _delete_file_if_unreferenced(doc)
     _refresh_kb_counts(kb_id)
     _persist()
+    _trigger_rag_rebuild()
     return None
 
 
@@ -355,9 +416,7 @@ async def create_index(
     }
 
     try:
-        from src.api.dependencies import _rag_service
-        if hasattr(_rag_service, '_real'):
-            _rag_service._real._initialized = False
+        _trigger_rag_rebuild()
     except Exception:
         pass
 
