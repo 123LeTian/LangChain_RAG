@@ -299,7 +299,7 @@
           </label>
           <label>
             <span>模型名</span>
-            <input v-model="modelDraft.model_name" type="text" placeholder="deepseek-chat" />
+            <input v-model="modelDraft.model_name" type="text" placeholder="mock-chat" />
           </label>
           <label>
             <span>Base URL</span>
@@ -394,7 +394,7 @@ const searchModalOpen = ref(false)
 const searchInputRef = ref(null)
 const selectedSearchIndex = ref(0)
 const sidebarModelOptions = ref([])
-const defaultModelId = ref('deepseek-chat')
+const defaultModelId = ref('mock-chat')
 const configModalOpen = ref('')
 const configMessage = ref('')
 const itemDialogOpen = ref('')
@@ -432,7 +432,7 @@ const modelDraft = reactive(emptyModelDraft())
 const presetDraft = reactive(emptyPresetDraft())
 
 const chatSettings = reactive({
-  modelId: 'deepseek-chat',
+  modelId: 'mock-chat',
   presetId: 'default-assistant',
   mode: 'naive',
   kbId: '',
@@ -468,7 +468,7 @@ const sidebarKnowledgeBaseOptions = computed(() => [
 ])
 
 const currentModelLabel = computed(() =>
-  sidebarModelOptions.value.find(model => model.value === chatSettings.modelId)?.label || 'DeepSeek Chat'
+  sidebarModelOptions.value.find(model => model.value === chatSettings.modelId)?.label || 'Mock Chat'
 )
 
 const currentPresetLabel = computed(() =>
@@ -513,13 +513,13 @@ async function loadSidebarModels() {
       label: model.display_name,
       provider: model.provider,
     }))
-    defaultModelId.value = data.default_model_id || sidebarModelOptions.value[0]?.value || 'deepseek-chat'
+    defaultModelId.value = data.default_model_id || sidebarModelOptions.value[0]?.value || 'mock-chat'
     if (!sidebarModelOptions.value.some(model => model.value === chatSettings.modelId)) {
       chatSettings.modelId = defaultModelId.value
     }
   } catch {
-    sidebarModelOptions.value = [{ value: 'deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek' }]
-    defaultModelId.value = 'deepseek-chat'
+    sidebarModelOptions.value = [{ value: 'mock-chat', label: 'Mock Chat', provider: 'mock' }]
+    defaultModelId.value = 'mock-chat'
   }
 }
 

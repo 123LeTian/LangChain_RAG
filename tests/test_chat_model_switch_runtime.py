@@ -55,7 +55,25 @@ def runtime_client(tmp_path):
     session_service = SessionService(store)
     message_service = MessageService(store)
     memory_service = MemoryService(message_service)
-    registry = ModelRegistry()
+    registry = ModelRegistry(custom_path=tmp_path / "custom_models.json")
+    registry.create_model({
+        "id": "deepseek-reasoner",
+        "provider": "deepseek",
+        "display_name": "DeepSeek Reasoner",
+        "model_name": "deepseek-reasoner",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "enabled": True,
+    })
+    registry.create_model({
+        "id": "gpt-4o",
+        "provider": "openai",
+        "display_name": "GPT-4o",
+        "model_name": "gpt-4o",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "enabled": False,
+    })
     rag_service = RecordingRAGService()
     app_service = ChatApplicationService(
         session_service,
@@ -112,7 +130,7 @@ def test_chat_stream_uses_session_model_when_request_omits_model(runtime_client)
         json={"question": "hello"},
     ) as response:
         assert response.status_code == 200
-        _read_sse(response)
+        events = _read_sse(response)
 
     assert rag_service.requests[-1].options["model"]["id"] == "deepseek-reasoner"
 
@@ -127,9 +145,11 @@ def test_chat_stream_uses_default_model_without_request_or_session_model(runtime
         json={"question": "hello"},
     ) as response:
         assert response.status_code == 200
-        _read_sse(response)
+        events = _read_sse(response)
 
-    assert rag_service.requests[-1].options["model"]["id"] == "deepseek-chat"
+    assert not rag_service.requests
+    assert events[-1]["content"] == "您好，我是本地默认模型，不会回答任何问题，只用于测试，请在模型配置页面添加您的模型"
+    assert events[-1]["model_id"] == "mock-chat"
 
 
 def test_chat_rag_request_uses_original_question_not_history_context(runtime_client):
@@ -140,7 +160,7 @@ def test_chat_rag_request_uses_original_question_not_history_context(runtime_cli
         with client.stream(
             "POST",
             f"/api/chat/sessions/{session['id']}/stream",
-            json={"question": question},
+            json={"question": question, "model_id": "deepseek-reasoner"},
         ) as response:
             assert response.status_code == 200
             _read_sse(response)
@@ -164,12 +184,22 @@ def test_missing_key_stream_returns_clear_error(tmp_path, monkeypatch):
     store = SQLiteChatStore(tmp_path / "chat.db")
     session_service = SessionService(store)
     message_service = MessageService(store)
+    registry = ModelRegistry(custom_path=tmp_path / "custom_missing_key_models.json")
+    registry.create_model({
+        "id": "deepseek-chat",
+        "provider": "deepseek",
+        "display_name": "DeepSeek Chat",
+        "model_name": "deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "enabled": True,
+    })
     app_service = ChatApplicationService(
         session_service,
         message_service,
         MemoryService(message_service),
         RAGGateway(RealRAGServiceDouble()),
-        ModelRegistry(),
+        registry,
     )
     app.dependency_overrides[get_chat_session_service] = lambda: session_service
     app.dependency_overrides[get_chat_message_service] = lambda: message_service

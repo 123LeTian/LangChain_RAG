@@ -286,12 +286,13 @@ class ModelRegistry:
     def _default_models(self) -> List[ChatModel]:
         return [
             ChatModel(
-                id="deepseek-chat",
-                provider="deepseek",
-                display_name="DeepSeek Chat",
-                model_name="deepseek-chat",
-                base_url="https://api.deepseek.com/v1",
-                api_key_env="DEEPSEEK_API_KEY",
+                id="mock-chat",
+                provider="mock",
+                display_name="Mock Chat",
+                model_name="mock-chat",
+                base_url=None,
+                api_key_env=None,
+                description="Local mock model for testing custom model creation.",
                 supports_stream=True,
                 enabled=True,
                 is_default=True,

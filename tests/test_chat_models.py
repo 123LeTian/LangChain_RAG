@@ -55,11 +55,9 @@ def test_list_chat_models_returns_enabled_models(client):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["default_model_id"] == "deepseek-chat"
+    assert data["default_model_id"] == "mock-chat"
     ids = [model["id"] for model in data["models"]]
-    assert "deepseek-chat" in ids
-    assert "deepseek-reasoner" in ids
-    assert "gpt-4o" not in ids
+    assert ids == ["mock-chat"]
 
 
 def test_list_chat_models_does_not_expose_api_keys(client):
@@ -98,7 +96,7 @@ def test_list_chat_models_has_one_default_model(client):
 
     defaults = [model for model in response.json()["models"] if model["is_default"]]
     assert len(defaults) == 1
-    assert defaults[0]["id"] == "deepseek-chat"
+    assert defaults[0]["id"] == "mock-chat"
 
 
 def test_custom_model_crud_and_default_model(client):
@@ -136,14 +134,24 @@ def test_custom_model_crud_and_default_model(client):
 
 
 def test_builtin_model_is_read_only(client):
-    response = client.delete("/api/chat/models/deepseek-chat")
+    response = client.delete("/api/chat/models/mock-chat")
 
     assert response.status_code == 422
 
 
 def test_model_connection_reports_missing_key(client, monkeypatch):
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    response = client.post("/api/chat/models/deepseek-chat/test")
+    monkeypatch.delenv("MISSING_MODEL_KEY", raising=False)
+    created = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "openai",
+            "display_name": "Missing Key Model",
+            "model_name": "missing-key-model",
+            "base_url": "https://example.invalid/v1",
+            "api_key_env": "MISSING_MODEL_KEY",
+        },
+    ).json()
+    response = client.post(f"/api/chat/models/{created['id']}/test")
 
     assert response.status_code == 200
     data = response.json()
@@ -170,21 +178,30 @@ def test_local_model_connection_does_not_require_key(client):
 
 def test_update_session_model(client):
     session = client.post("/api/chat/sessions", json={"title": "chat"}).json()
+    created = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "ollama",
+            "display_name": "Local Test Model",
+            "model_name": "local-test-model",
+            "base_url": "http://localhost:11434/v1",
+        },
+    ).json()
 
     response = client.patch(
         f"/api/chat/sessions/{session['id']}/model",
-        json={"model_id": "deepseek-reasoner"},
+        json={"model_id": created["id"]},
     )
 
     assert response.status_code == 200
-    assert response.json()["model_id"] == "deepseek-reasoner"
-    assert client.get(f"/api/chat/sessions/{session['id']}").json()["model_id"] == "deepseek-reasoner"
+    assert response.json()["model_id"] == created["id"]
+    assert client.get(f"/api/chat/sessions/{session['id']}").json()["model_id"] == created["id"]
 
 
 def test_update_missing_session_model_returns_404(client):
     response = client.patch(
         "/api/chat/sessions/missing/model",
-        json={"model_id": "deepseek-chat"},
+        json={"model_id": "mock-chat"},
     )
 
     assert response.status_code == 404
@@ -203,10 +220,20 @@ def test_update_unknown_model_returns_validation_error(client):
 
 def test_update_disabled_model_returns_validation_error(client):
     session = client.post("/api/chat/sessions", json={"title": "chat"}).json()
+    created = client.post(
+        "/api/chat/models",
+        json={
+            "provider": "ollama",
+            "display_name": "Disabled Local Model",
+            "model_name": "disabled-local-model",
+            "base_url": "http://localhost:11434/v1",
+            "enabled": False,
+        },
+    ).json()
 
     response = client.patch(
         f"/api/chat/sessions/{session['id']}/model",
-        json={"model_id": "gpt-4o"},
+        json={"model_id": created["id"]},
     )
 
     assert response.status_code == 422

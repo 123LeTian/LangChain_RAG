@@ -9,8 +9,8 @@ from src.chat.model_registry import ChatModel
 from src.config.runtime_config import get_model_env_var
 
 
-SUPPORTED_PROVIDERS = {"deepseek", "openai", "qwen", "ollama", "local"}
-LOCAL_PROVIDERS = {"ollama", "local"}
+SUPPORTED_PROVIDERS = {"deepseek", "openai", "qwen", "ollama", "local", "mock"}
+LOCAL_PROVIDERS = {"ollama", "local", "mock"}
 
 
 class ModelRuntimeError(Exception):

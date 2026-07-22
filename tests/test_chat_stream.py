@@ -58,7 +58,7 @@ def client(tmp_path):
     session_service = SessionService(store)
     message_service = MessageService(store)
     memory_service = MemoryService(message_service)
-    model_registry = ModelRegistry()
+    model_registry = ModelRegistry(custom_path=tmp_path / "custom_models.json")
     gateway = FakeRAGGateway()
     gateway.bind_message_service(message_service)
     app_service = ChatApplicationService(
@@ -229,12 +229,12 @@ def test_stream_passes_request_model_id_to_gateway(client):
     with test_client.stream(
         "POST",
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "What is RAG?", "model_id": "deepseek-reasoner"},
+        json={"question": "What is RAG?", "model_id": "mock-chat"},
     ) as response:
         assert response.status_code == 200
         _read_sse(response)
 
-    assert gateway.calls[-1]["model_id"] == "deepseek-reasoner"
+    assert gateway.calls[-1]["model_id"] == "mock-chat"
 
 
 def test_stream_uses_session_model_when_request_omits_model(client):
@@ -242,13 +242,13 @@ def test_stream_uses_session_model_when_request_omits_model(client):
     session = _create_session(test_client)
     response = test_client.patch(
         f"/api/chat/sessions/{session['id']}/model",
-        json={"model_id": "deepseek-reasoner"},
+        json={"model_id": "mock-chat"},
     )
     assert response.status_code == 200
 
     _stream(test_client, session["id"], "What is RAG?")
 
-    assert gateway.calls[-1]["model_id"] == "deepseek-reasoner"
+    assert gateway.calls[-1]["model_id"] == "mock-chat"
 
 
 def test_stream_uses_default_model_when_session_has_no_model(client):
@@ -257,7 +257,7 @@ def test_stream_uses_default_model_when_session_has_no_model(client):
 
     _stream(test_client, session["id"], "What is RAG?")
 
-    assert gateway.calls[-1]["model_id"] == "deepseek-chat"
+    assert gateway.calls[-1]["model_id"] == "mock-chat"
 
 
 def test_original_rag_stream_route_still_registered(client):

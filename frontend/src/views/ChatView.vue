@@ -336,7 +336,7 @@ const presetOptions = reactive([
 const advancedModes = ['advanced', 'modular']
 const generationSettings = ref({
   preset: 'default-assistant',
-  model: 'deepseek-chat',
+  model: 'mock-chat',
 })
 const agentTools = ref({
   vector: true,
@@ -355,7 +355,7 @@ const activeMessage = ref(null)
 const errorText = ref('')
 const activeStreamSessionId = ref('')
 const modelOptions = ref([])
-const defaultModelId = ref('deepseek-chat')
+const defaultModelId = ref('mock-chat')
 const defaultPresetId = ref('default-assistant')
 
 let abortCtrl = null
@@ -628,7 +628,7 @@ const currentPresetLabel = computed(() =>
 )
 
 const currentModelLabel = computed(() =>
-  modelOptions.value.find(item => item.value === generationSettings.value.model)?.label || 'DeepSeek Chat'
+  modelOptions.value.find(item => item.value === generationSettings.value.model)?.label || 'Mock Chat'
 )
 
 const kbOptions = computed(() => [
@@ -747,14 +747,14 @@ async function loadModels() {
       provider: model.provider,
       model,
     }))
-    defaultModelId.value = data.default_model_id || modelOptions.value[0]?.value || 'deepseek-chat'
+    defaultModelId.value = data.default_model_id || modelOptions.value[0]?.value || 'mock-chat'
     if (!modelOptions.value.some(item => item.value === generationSettings.value.model)) {
       generationSettings.value.model = defaultModelId.value
     }
   } catch (err) {
     errorText.value = err?.message || '模型列表加载失败'
-    modelOptions.value = [{ value: 'deepseek-chat', label: 'DeepSeek Chat' }]
-    defaultModelId.value = 'deepseek-chat'
+    modelOptions.value = [{ value: 'mock-chat', label: 'Mock Chat' }]
+    defaultModelId.value = 'mock-chat'
   }
 }
 

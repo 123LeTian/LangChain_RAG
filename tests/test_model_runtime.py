@@ -13,8 +13,8 @@ from src.chat.model_runtime import ModelRuntimeError, resolve_runtime_config
 def test_registry_default_model_resolves():
     model = ModelRegistry().default_model()
 
-    assert model.id == "deepseek-chat"
-    assert model.provider == "deepseek"
+    assert model.id == "mock-chat"
+    assert model.provider == "mock"
 
 
 def test_missing_api_key_returns_clear_error(monkeypatch):

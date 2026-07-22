@@ -12,6 +12,7 @@ from src.chat.structured_logger import StructuredLogger
 
 
 ChatStreamEvent = Dict[str, Any]
+MOCK_MODEL_ANSWER = "您好，我是本地默认模型，不会回答任何问题，只用于测试，请在模型配置页面添加您的模型"
 
 
 class RAGGateway:
@@ -44,6 +45,16 @@ class RAGGateway:
     ) -> AsyncIterator[ChatStreamEvent]:
         started_at = time.monotonic()
         try:
+            if self._is_mock_model(model_config):
+                async for event in self._stream_mock_model(
+                    model_id=model_id,
+                    model_config=model_config,
+                    request_id=request_id,
+                    started_at=started_at,
+                ):
+                    yield event
+                return
+
             self._validate_model_for_real_rag(model_config)
             request = self._build_request(
                 session_id=session_id,
@@ -217,6 +228,45 @@ class RAGGateway:
         if isinstance(exc, TimeoutError) or type(exc).__name__ in {"TimeoutError", "ReadTimeout", "ConnectTimeout"}:
             return "模型调用超时，请稍后重试"
         return str(exc)
+
+    def _is_mock_model(self, model_config: Optional[Any]) -> bool:
+        return str(getattr(model_config, "provider", "") or "").lower() == "mock"
+
+    async def _stream_mock_model(
+        self,
+        *,
+        model_id: Optional[str],
+        model_config: Optional[Any],
+        request_id: Optional[str],
+        started_at: float,
+    ) -> AsyncIterator[ChatStreamEvent]:
+        provider = getattr(model_config, "provider", "mock")
+        model_name = getattr(model_config, "model_name", model_id or "mock-chat")
+        trace = [{
+            "stage": "model",
+            "duration_ms": 0,
+            "input_summary": "chat model selection",
+            "output_summary": f"Using mock model {model_id or model_name}",
+            "metadata": {
+                "model_id": model_id or model_name,
+                "provider": provider,
+                "model_name": model_name,
+            },
+        }]
+        yield {"type": "trace", "trace": trace}
+        yield {"type": "chunk", "content": MOCK_MODEL_ANSWER}
+        yield {
+            "type": "done",
+            "content": MOCK_MODEL_ANSWER,
+            "citations": [],
+            "trace": trace,
+            "latency_ms": int((time.monotonic() - started_at) * 1000),
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "model_id": model_id or model_name,
+            "request_id": request_id,
+            "retry_count": 0,
+        }
 
     def _validate_model_for_real_rag(self, model_config: Optional[Any]) -> None:
         if model_config is None:
