@@ -254,6 +254,72 @@ def test_model_trace_contains_model_id_provider_but_not_secret(runtime_client):
 
 
 @pytest.mark.asyncio
+async def test_unified_rag_service_uses_request_model_config(monkeypatch):
+    calls: List[Dict[str, Any]] = []
+
+    class FakeRuntimeLLM:
+        async def ainvoke(self, text: str):
+            calls.append({"invoke_text": text})
+            return type(
+                "FakeResponse",
+                (),
+                {
+                    "content": "selected model answer",
+                    "usage_metadata": {"input_tokens": 3, "output_tokens": 2},
+                },
+            )()
+
+    def fake_create_chat_model(self, model_config=None, **kwargs):
+        calls.append({"model_config": model_config, "kwargs": kwargs})
+        return FakeRuntimeLLM()
+
+    from src.api.api_models import RAGRequest
+    from src.api.unified_rag_service import UnifiedRAGApiService
+    from src.chat.llm_client_factory import LLMClientFactory
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("FRONTEND_MODEL_KEY", "front-secret")
+    monkeypatch.setattr(
+        LLMClientFactory,
+        "create_chat_model",
+        fake_create_chat_model,
+    )
+
+    service = UnifiedRAGApiService()
+    adapter = service._create_llm_for_request(
+        RAGRequest(
+            query="What is RAG?",
+            mode=RAGMode.NAIVE,
+            options={
+                "temperature": 0.42,
+                "model": {
+                    "id": "front-model",
+                    "provider": "openai",
+                    "model_name": "gpt-front",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key_env": "FRONTEND_MODEL_KEY",
+                    "enabled": True,
+                },
+            },
+        )
+    )
+
+    answer, usage = await adapter.generate_with_tokens("Prompt", "Context")
+
+    assert answer == "selected model answer"
+    assert usage == {"input_tokens": 3, "output_tokens": 2}
+    assert calls[0]["model_config"]["id"] == "front-model"
+    assert calls[0]["model_config"]["api_key_env"] == "FRONTEND_MODEL_KEY"
+    assert calls[0]["kwargs"]["temperature"] == 0.42
+    assert calls[0]["kwargs"]["max_tokens"] == 1000
+    assert adapter.metadata == {
+        "model_id": "front-model",
+        "provider": "openai",
+        "model_name": "gpt-front",
+    }
+
+
+@pytest.mark.asyncio
 async def test_old_rag_request_without_model_config_uses_default_deepseek_path(monkeypatch):
     class FakeResponse:
         content = "runtime answer"

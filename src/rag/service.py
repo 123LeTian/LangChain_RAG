@@ -246,7 +246,7 @@ class RAGService:
         recorder = TraceRecorder()
         recorder.start_trace(trace_id)
 
-        return RAGContext(
+        context = RAGContext(
             query=request.query,
             chunks=[],
             retrieval_method="pending",
@@ -262,6 +262,13 @@ class RAGService:
                 "kb_id": request.kb_id,
             },
         )
+
+        # Inject graph retriever for GraphRAG and Agentic strategies
+        if self._graph is not None:
+            context.graph = self._graph
+            context.config["graph_retriever"] = self._graph
+
+        return context
 
     async def _execute_with_guard(
         self,

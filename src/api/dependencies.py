@@ -48,10 +48,10 @@ class KnowledgeService:
 # ============================================================================
 
 class RAGService:
-    """RAG 服务 — 委托给 RealRAGService (DeepSeek + HuggingFace 向量检索)"""
+    """RAG 服务 — 委托给 UnifiedRAGApiService (按 mode 分发到五种 Strategy)"""
     def __init__(self):
-        from src.api.real_rag_service import RealRAGService
-        self._real = RealRAGService()
+        from src.api.unified_rag_service import get_unified_rag_service
+        self._real = get_unified_rag_service()
 
     async def query(self, request: Any) -> Any:
         return await self._real.query(request)

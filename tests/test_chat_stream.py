@@ -263,9 +263,22 @@ def test_stream_uses_default_model_when_session_has_no_model(client):
 
 
 def test_original_rag_stream_route_still_registered(client):
-    paths = {getattr(route, "path", "") for route in app.routes}
+    # Collect all route paths from both flat Route objects and
+    # _IncludedRouter wrappers (FastAPI >=0.115 nests included routers)
+    paths: set[str] = set()
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        if isinstance(path, str):
+            paths.add(path)
+        # Unwrap _IncludedRouter: the inner APIRouter is at .original_router
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            for sub in getattr(inner, "routes", []):
+                sub_path = getattr(sub, "path", None)
+                if isinstance(sub_path, str):
+                    paths.add(sub_path)
 
-    assert "/api/rag/query/stream" in paths
+    assert "/api/rag/query/stream" in paths, f"Expected route not found in: {sorted(paths)}"
 
 
 @pytest.mark.asyncio
