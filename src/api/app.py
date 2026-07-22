@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .dependencies import _chat_store
 from .errors import register_error_handlers
 from .routes import ALL_ROUTERS
 
@@ -23,6 +24,7 @@ from .routes import ALL_ROUTERS
 async def lifespan(app: FastAPI):
     """启动时初始化，关闭时清理资源"""
     # 启动逻辑：后续可在这里初始化数据库连接池、模型预热等
+    _chat_store.initialize()
     yield
     # 关闭逻辑：后续可在这里关闭连接、清理临时文件等
 

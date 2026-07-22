@@ -41,15 +41,31 @@ _load_env()
 
 # Questions that don't need document retrieval — go straight to LLM
 _CHAT_PATTERNS = [
-    "你是谁", "你是", "你叫", "你好", "hello", "hi", "谢谢",
+    "你是谁", "你是", "你叫", "你好", "hello", "hi", "谢谢", "你是什么",
+    "什么模型", "你在", "你会", "你能", "你可", "你的",
     "今天", "时间", "日期", "周几", "星期", "能做什么", "功能",
     "帮我", "write", "translate", "翻译", "写一首", "写一段",
+    "再见", "拜拜", "bye", "谢谢", "感谢",
+]
+
+# Prefix-only patterns: match at start after stripping punctuation
+_CHAT_START_PATTERNS = [
+    "你", "我", "嗨", "喂", "在吗", "在么",
 ]
 
 
 def _is_chat_question(query: str) -> bool:
-    q = query.lower().strip()
-    return any(p in q for p in _CHAT_PATTERNS)
+    q = query.lower().strip().rstrip("?？!！.。~～ ")
+    # Very short queries (<=3 chars after stripping) are likely chat
+    if len(q) <= 3:
+        return True
+    # Pattern match in query
+    if any(p in q for p in _CHAT_PATTERNS):
+        return True
+    # Prefix match
+    if any(q.startswith(p) for p in _CHAT_START_PATTERNS):
+        return True
+    return False
 
 
 class RealRAGService:
@@ -135,7 +151,7 @@ class RealRAGService:
         self.build_naive_prompt = build_naive_prompt
 
         self.llm = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+            model=os.getenv("DEEPSEEK_MODEL_NAME", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
             temperature=0.1,
@@ -159,11 +175,44 @@ class RealRAGService:
             print("[RAG] Starting initialization (in background thread)...", flush=True)
             await asyncio.to_thread(self._do_init)
 
-    def _create_llm(self):
-        """Create a fresh LLM instance for direct chat."""
+    def _create_llm(self, model_options: dict | None = None):
+        """Create an LLM instance — uses selected model from request if available."""
         from langchain_openai import ChatOpenAI
+
+        # Use the selected model from the request if available
+        if model_options:
+            model_name = model_options.get("model_name") or os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat")
+            provider = (model_options.get("provider") or "").lower()
+            base_url = model_options.get("base_url") or "https://api.deepseek.com/v1"
+            # Resolve API key: prefer model-specific key, then env var, then DeepSeek fallback
+            api_key_env = model_options.get("api_key_env")
+            api_key = None
+            if api_key_env:
+                api_key = os.getenv(api_key_env)
+            if not api_key:
+                # Fallback: try provider env vars
+                provider_keys = {
+                    "deepseek": "DEEPSEEK_API_KEY",
+                    "openai": "OPENAI_API_KEY",
+                    "qwen": "QWEN_API_KEY",
+                    "glm": "GLM_API_KEY",
+                    "moonshot": "MOONSHOT_API_KEY",
+                }
+                fallback_env = provider_keys.get(provider)
+                if fallback_env:
+                    api_key = os.getenv(fallback_env)
+            print(f"[RAG] Creating LLM: provider={provider}, model={model_name}, base_url={base_url}", flush=True)
+            return ChatOpenAI(
+                model=model_name,
+                api_key=api_key or "sk-placeholder",
+                base_url=base_url,
+                temperature=0.7,
+                max_tokens=1000,
+            )
+
+        # Fallback: DeepSeek (backward compatibility)
         return ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+            model=os.getenv("DEEPSEEK_MODEL_NAME", os.getenv("DEEPSEEK_MODEL", "deepseek-chat")),
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
             temperature=0.7,
@@ -177,11 +226,14 @@ class RealRAGService:
         trace_id = uuid.uuid4().hex[:12]
         events: list[TraceEvent] = []
 
-        # Simple chat questions — skip RAG, go straight to DeepSeek
+        # Extract model options from request (set by RAGGateway)
+        model_options = request.options.get("model") if hasattr(request, "options") and request.options else None
+
+        # Simple chat questions — skip RAG, go straight to LLM
         if _is_chat_question(query_text):
             print(f"[RAG] Chat question (no retrieval): {query_text[:50]}", flush=True)
             t0 = time.time()
-            llm = self._create_llm()
+            llm = self._create_llm(model_options)
             response = await asyncio.to_thread(llm.invoke, query_text)
             answer = response.content
             events.append(TraceEvent(
