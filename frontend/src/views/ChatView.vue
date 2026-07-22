@@ -174,8 +174,24 @@
                       <input v-model="props.chatSettings.rewriteEnabled" type="checkbox" />
                     </label>
                     <label class="switch-field">
+                      <span>Retrieve</span>
+                      <input v-model="props.chatSettings.retrieveEnabled" type="checkbox" />
+                    </label>
+                    <label class="switch-field">
                       <span>Cross-Encoder Rerank</span>
                       <input v-model="props.chatSettings.rerankEnabled" type="checkbox" />
+                    </label>
+                    <label class="switch-field">
+                      <span>Compress</span>
+                      <input v-model="props.chatSettings.compressEnabled" type="checkbox" />
+                    </label>
+                    <label class="switch-field">
+                      <span>Verify</span>
+                      <input v-model="props.chatSettings.verifyEnabled" type="checkbox" />
+                    </label>
+                    <label class="slider-field">
+                      <span>Rerank Top-K：{{ props.chatSettings.rerankTopK }}</span>
+                      <input v-model.number="props.chatSettings.rerankTopK" type="range" min="1" max="20" />
                     </label>
                   </template>
 
@@ -482,8 +498,14 @@ async function sendQuery() {
       model_id: generationSettings.value.model,
       preset_id: generationSettings.value.preset,
       top_k: props.chatSettings.topK,
+      rerank_top_k: props.chatSettings.rerankTopK,
       score_threshold: props.chatSettings.scoreThreshold,
       temperature: null,
+      rewrite_enabled: props.chatSettings.rewriteEnabled,
+      retrieve_enabled: props.chatSettings.retrieveEnabled,
+      rerank_enabled: props.chatSettings.rerankEnabled,
+      compress_enabled: props.chatSettings.compressEnabled,
+      verify_enabled: props.chatSettings.verifyEnabled,
     },
     async (event) => {
       if (event.type === 'chunk') {

@@ -104,8 +104,14 @@ class ChatStreamRequest(BaseModel):
     model_id: Optional[str] = None
     preset_id: Optional[str] = None
     top_k: Optional[int] = Field(default=None, ge=1)
+    rerank_top_k: Optional[int] = Field(default=None, ge=1)
     score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    rewrite_enabled: Optional[bool] = None
+    retrieve_enabled: Optional[bool] = None
+    rerank_enabled: Optional[bool] = None
+    compress_enabled: Optional[bool] = None
+    verify_enabled: Optional[bool] = None
 
     @field_validator("question")
     @classmethod

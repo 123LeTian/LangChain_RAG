@@ -40,8 +40,14 @@ class RAGGateway:
         preset_config: Optional[Any] = None,
         request_id: Optional[str] = None,
         top_k: Optional[int] = None,
+        rerank_top_k: Optional[int] = None,
         score_threshold: Optional[float] = None,
         temperature: Optional[float] = None,
+        rewrite_enabled: Optional[bool] = None,
+        retrieve_enabled: Optional[bool] = None,
+        rerank_enabled: Optional[bool] = None,
+        compress_enabled: Optional[bool] = None,
+        verify_enabled: Optional[bool] = None,
     ) -> AsyncIterator[ChatStreamEvent]:
         started_at = time.monotonic()
         try:
@@ -66,8 +72,14 @@ class RAGGateway:
                 preset_id=preset_id,
                 preset_config=preset_config,
                 top_k=top_k,
+                rerank_top_k=rerank_top_k,
                 score_threshold=score_threshold,
                 temperature=temperature,
+                rewrite_enabled=rewrite_enabled,
+                retrieve_enabled=retrieve_enabled,
+                rerank_enabled=rerank_enabled,
+                compress_enabled=compress_enabled,
+                verify_enabled=verify_enabled,
             )
             result, retry_count = await self._retry_policy.run(
                 lambda: self._rag_service.query(request),
@@ -165,16 +177,33 @@ class RAGGateway:
         preset_id: Optional[str],
         preset_config: Optional[Any],
         top_k: Optional[int],
+        rerank_top_k: Optional[int],
         score_threshold: Optional[float],
         temperature: Optional[float],
+        rewrite_enabled: Optional[bool],
+        retrieve_enabled: Optional[bool],
+        rerank_enabled: Optional[bool],
+        compress_enabled: Optional[bool],
+        verify_enabled: Optional[bool],
     ) -> RAGRequest:
         options: Dict[str, Any] = {}
         if top_k is not None:
             options["top_k"] = top_k
+        if rerank_top_k is not None:
+            options["rerank_top_k"] = rerank_top_k
         if score_threshold is not None:
             options["score_threshold"] = score_threshold
         if temperature is not None:
             options["temperature"] = temperature
+        for key, value in {
+            "rewrite_enabled": rewrite_enabled,
+            "retrieve_enabled": retrieve_enabled,
+            "rerank_enabled": rerank_enabled,
+            "compress_enabled": compress_enabled,
+            "verify_enabled": verify_enabled,
+        }.items():
+            if value is not None:
+                options[key] = value
         if query:
             options["chat_original_question"] = query
         if model_id is not None:

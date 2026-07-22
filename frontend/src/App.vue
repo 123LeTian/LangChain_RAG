@@ -437,8 +437,12 @@ const chatSettings = reactive({
   mode: 'naive',
   kbId: '',
   topK: 5,
+  rerankTopK: 5,
   rewriteEnabled: false,
+  retrieveEnabled: true,
   rerankEnabled: false,
+  compressEnabled: true,
+  verifyEnabled: false,
   scoreThreshold: 0.2,
   maxSteps: 5,
 })

@@ -208,8 +208,14 @@ export interface ChatStreamRequest {
   model_id?: string | null
   preset_id?: string | null
   top_k?: number | null
+  rerank_top_k?: number | null
   score_threshold?: number | null
   temperature?: number | null
+  rewrite_enabled?: boolean | null
+  retrieve_enabled?: boolean | null
+  rerank_enabled?: boolean | null
+  compress_enabled?: boolean | null
+  verify_enabled?: boolean | null
 }
 
 export interface ChatPreset {

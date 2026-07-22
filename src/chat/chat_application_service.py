@@ -95,8 +95,14 @@ class ChatApplicationService:
             preset_config=preset,
             request_id=request_id,
             top_k=request.top_k,
+            rerank_top_k=request.rerank_top_k,
             score_threshold=request.score_threshold,
             temperature=request.temperature,
+            rewrite_enabled=request.rewrite_enabled,
+            retrieve_enabled=request.retrieve_enabled,
+            rerank_enabled=request.rerank_enabled,
+            compress_enabled=request.compress_enabled,
+            verify_enabled=request.verify_enabled,
         ):
             event_type = event.get("type")
             if event_type == "chunk":
