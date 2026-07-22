@@ -1,0 +1,18 @@
+app:
+  name: LangChain RAG
+  version: 0.1.0
+
+runtime:
+  env: dev
+
+chat:
+  memory_window: 8
+  default_title: 新对话
+
+retry:
+  timeout_seconds: 60
+  max_retries: 2
+  backoff_seconds: 1.5
+
+logging:
+  structured: true

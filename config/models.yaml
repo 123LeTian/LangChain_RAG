@@ -1,0 +1,13 @@
+models:
+  - id: mock-chat
+    provider: mock
+    display_name: Mock Chat
+    model_name: mock-chat
+    base_url: null
+    api_key_env: null
+    description: Local mock model for testing custom model creation.
+    supports_stream: true
+    supports_tools: false
+    supports_vision: false
+    enabled: true
+    is_default: true
