@@ -82,12 +82,14 @@ class TestConfigValidation:
         assert len(errors) >= 1
         assert any("rerank" in e.lower() for e in errors)
         assert any("retrieve" in e.lower() for e in errors)
+        assert any("依赖模块" in e for e in errors)
 
     def test_compress_without_retrieve_invalid(self):
         cfg = ModuleConfig(retrieve=False, compress=True)
         errors = validate_module_config(cfg)
         assert len(errors) >= 1
         assert any("compress" in e.lower() for e in errors)
+        assert any("依赖模块" in e for e in errors)
 
     def test_rewrite_alone_is_valid(self):
         """Rewrite doesn't depend on retrieve — it can be used alone."""
@@ -515,7 +517,7 @@ class TestAcceptanceCriterion2_IllegalConfigValidation:
         result = await strategy.run(req, ctx)
         assert result.answer == ""
         assert len(result.warnings) >= 1
-        assert any("Invalid pipeline configuration" in w for w in result.warnings)
+        assert any("配置错误" in w for w in result.warnings)
 
     @pytest.mark.asyncio
     async def test_valid_config_returns_no_warnings(self):
@@ -526,7 +528,7 @@ class TestAcceptanceCriterion2_IllegalConfigValidation:
         req = _make_request()
 
         result = await strategy.run(req, ctx)
-        config_warnings = [w for w in result.warnings if "Invalid pipeline configuration" in w]
+        config_warnings = [w for w in result.warnings if "配置错误" in w]
         assert len(config_warnings) == 0
 
 

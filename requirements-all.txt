@@ -1,0 +1,4 @@
+-r requirements-dev.txt
+-r requirements-openai.txt
+-r requirements-bge.txt
+-r requirements-chroma.txt

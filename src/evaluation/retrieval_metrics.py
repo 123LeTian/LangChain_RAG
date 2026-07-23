@@ -67,7 +67,9 @@ def source_matches(expected: Any, candidate: Any) -> bool:
             return False
         matches += 1
 
-    return matches > 0
+    if matches > 0:
+        return True
+    return _quote_matches(expected_fields.get("quote"), candidate_fields.get("text"))
 
 
 def _extract_source_fields(value: Any) -> Dict[str, str | None]:
@@ -130,6 +132,8 @@ def _extract_source_fields(value: Any) -> Dict[str, str | None]:
                 "title",
             )
         ),
+        "quote": _normalize_text(_first_present(merged, "quote", "text_snippet")),
+        "text": _normalize_text(_first_present(merged, "text", "content", "quote", "text_snippet")),
     }
 
 
@@ -151,6 +155,10 @@ def _object_to_mapping(value: Any) -> Dict[str, Any]:
             "title",
             "id",
             "chunk",
+            "text",
+            "content",
+            "quote",
+            "text_snippet",
         )
         if hasattr(value, name)
     }
@@ -181,6 +189,27 @@ def _normalize_filename(value: Any) -> str | None:
     if not text:
         return None
     return PurePath(text).name.lower()
+
+
+def _normalize_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).lower()
+    return "".join(text.split())
+
+
+def _quote_matches(expected_quote: str | None, candidate_text: str | None) -> bool:
+    if not expected_quote or not candidate_text:
+        return False
+    if expected_quote in candidate_text or candidate_text in expected_quote:
+        return True
+    if len(expected_quote) < 12 or len(candidate_text) < 12:
+        return False
+    window = min(len(expected_quote), 32)
+    return any(
+        expected_quote[index : index + window] in candidate_text
+        for index in range(0, max(len(expected_quote) - window + 1, 1), max(window // 2, 1))
+    )
 
 
 __all__ = [

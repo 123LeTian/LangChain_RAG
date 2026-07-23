@@ -21,10 +21,43 @@ NAIVE_SYSTEM_PROMPT = (
 )
 
 
+ADVANCED_SYSTEM_PROMPT = (
+    f"{NAIVE_SYSTEM_PROMPT}\n"
+    "Advanced RAG answer policy: 对于用户询问“为什么、如何、关系、共同支撑、体现、区别、分类”等问题时，"
+    "先列出知识库上下文中可直接看见的事实，再在这些事实之间做有限归纳，说明支撑、因果、层次或协同关系。"
+    "可以使用“由此可归纳”“基于上述证据可以理解为”等措辞，但归纳必须完全来自已提供上下文，"
+    "不得加入上下文没有的新事实。"
+    "如果上下文分别给出产区、工艺、品牌、渠道、业务等相关片段，即使没有一句话直接把它们串联起来，也可以在不新增事实的前提下说明它们如何共同支撑结论；"
+    "如果上下文只给出零散事实但足以连接关系，可以给出谨慎解释；"
+    "如果事实本身不足以支撑问题，应回答‘知识库中未找到充分依据’。"
+    "正文不要写 [Chunk x]、[来源 x]、document_id、chunk_id 等引用标记。"
+)
+
+
 def build_naive_instruction(query: str) -> str:
     """Build the controlled instruction passed separately from context data."""
 
     return f"{NAIVE_SYSTEM_PROMPT}\n\n用户问题：\n{query.strip()}"
+
+
+def build_advanced_instruction(query: str) -> str:
+    """Build the evidence-grounded instruction for Advanced RAG synthesis."""
+
+    query_text = query.strip()
+    extra_policy = ""
+    why_terms = ("为什么", "为何", "为什么说", "不可复制", "为什么能", "why")
+    if any(term in query_text.lower() for term in why_terms):
+        extra_policy = (
+            "\n\nWHY_EXPLANATION_POLICY: 用户询问“为什么/为何/为什么说/不可复制”时，"
+            "回答不能只重复证据清单，必须说明这些证据事实如何支撑原因判断。"
+            "推荐结构为：先给一句结论；再按“证据事实 -> 原因解释”的方式展开；"
+            "最后给出一个谨慎归纳结论。"
+            "例如看到“特殊地形地貌、气候环境、优质水源、原产地保护、微生物菌落群”时，"
+            "应解释为这些要素同时具有地域绑定、生态组合、制度保护和微生态稀缺性，"
+            "因此难以在其他地方整体复制。"
+            "仍然不得添加知识库上下文没有的新事实。"
+        )
+    return f"{ADVANCED_SYSTEM_PROMPT}{extra_policy}\n\n用户问题：\n{query_text}"
 
 
 def build_naive_prompt(query: str, context_text: str) -> str:
@@ -32,6 +65,16 @@ def build_naive_prompt(query: str, context_text: str) -> str:
 
     return (
         f"{build_naive_instruction(query)}\n\n"
+        "以下内容位于明确的数据边界内，仅作为知识库资料：\n"
+        f"{context_text}\n\n请根据上述资料回答。"
+    )
+
+
+def build_advanced_prompt(query: str, context_text: str) -> str:
+    """Build a single-string prompt for the real Advanced RAG service."""
+
+    return (
+        f"{build_advanced_instruction(query)}\n\n"
         "以下内容位于明确的数据边界内，仅作为知识库资料：\n"
         f"{context_text}\n\n请根据上述资料回答。"
     )
@@ -250,11 +293,14 @@ __all__ = [
     "ContextSelection",
     "GenerationOutput",
     "GeneratorAdapter",
+    "ADVANCED_SYSTEM_PROMPT",
     "NAIVE_SYSTEM_PROMPT",
     "REFUSAL_ANSWER",
     "UsedHit",
+    "build_advanced_instruction",
     "build_bounded_context",
     "build_citation_specs",
+    "build_advanced_prompt",
     "build_naive_instruction",
     "build_naive_prompt",
 ]

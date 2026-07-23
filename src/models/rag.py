@@ -114,6 +114,12 @@ class RAGContext(BaseModel):
         repr=False,
         description="Retriever conforming to RetrieverProtocol",
     )
+    graph: Any = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description="Graph retriever conforming to GraphRetrieverProtocol",
+    )
     tools: List[Any] = Field(
         default_factory=list,
         exclude=True,

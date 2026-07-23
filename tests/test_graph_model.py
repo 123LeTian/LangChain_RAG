@@ -114,6 +114,34 @@ def test_get_graph_builds_nodes_from_uploaded_document(graph_client):
     }
 
 
+def test_upload_document_persists_chunk_counts(graph_client):
+    client, _, _ = graph_client
+
+    upload = client.post(
+        "/api/knowledge-bases/kb_graph/documents",
+        files={
+            "file": (
+                "chunks.txt",
+                b"RAG depends on Retrieval. Retrieval contains Vector Search.",
+                "text/plain",
+            )
+        },
+    )
+
+    assert upload.status_code == 201
+    assert upload.json()["chunk_count"] >= 1
+
+    docs = client.get("/api/knowledge-bases/kb_graph/documents")
+    assert docs.status_code == 200
+    assert docs.json()[0]["chunk_count"] >= 1
+
+    kbs = client.get("/api/knowledge-bases")
+    assert kbs.status_code == 200
+    kb = next(item for item in kbs.json() if item["id"] == "kb_graph")
+    assert kb["doc_count"] == 1
+    assert kb["chunk_count"] >= 1
+
+
 def test_get_graph_calls_selected_non_mock_model(graph_client, monkeypatch):
     client, _, _ = graph_client
     calls = []

@@ -436,8 +436,21 @@ export async function updateGraphModel(kbId: string, modelId: string): Promise<{
   })
 }
 
-export async function runEvaluation(kbId: string, modes: string[]): Promise<{ run_id: string }> {
-  return request('/api/evaluations/run', { method: 'POST', body: JSON.stringify({ kb_id: kbId, modes }) })
+export async function runEvaluation(
+  kbId: string,
+  modes: string[],
+  modelId?: string | null,
+  sampleLimit?: number | null,
+): Promise<{ run_id: string; status: string; kb_id: string; modes: string[]; model_id?: string | null; sample_limit?: number | null; message: string }> {
+  return request('/api/evaluations/run', {
+    method: 'POST',
+    body: JSON.stringify({
+      kb_id: kbId,
+      modes,
+      model_id: modelId ?? null,
+      sample_limit: sampleLimit ?? null,
+    }),
+  })
 }
 
 export async function getEvaluationResult(runId: string): Promise<EvaluationResult[]> {

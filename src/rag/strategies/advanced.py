@@ -14,8 +14,8 @@ from src.rag.c_contract import resolve_advanced_mode
 from src.rag.naive_support import (
     GeneratorAdapter,
     REFUSAL_ANSWER,
+    build_advanced_instruction,
     build_bounded_context,
-    build_naive_instruction,
 )
 from src.rag.strategies.naive import (
     NaiveRAGStrategy,
@@ -61,8 +61,65 @@ def _query_summary(queries: Sequence[str], limit: int = 160) -> str:
     )
 
 
+def _passes_score_threshold(score: float, threshold: float) -> bool:
+    return round(float(score), 2) >= threshold
+
+
 def _dependency(primary: Any, context: Any, name: str) -> Any:
     return primary if primary is not None else getattr(context, name, None)
+
+
+def _is_synthesis_query(query: str) -> bool:
+    normalized = "".join(str(query or "").lower().split())
+    keywords = (
+        "为什么",
+        "为何",
+        "如何",
+        "怎么",
+        "怎样",
+        "关系",
+        "共同",
+        "支撑",
+        "体现",
+        "区别",
+        "分类",
+        "联动",
+        "串起来",
+        "串联",
+        "归纳",
+        "总结",
+        "meaning",
+        "why",
+        "how",
+        "relationship",
+        "support",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _ensure_synthesis_context(
+    compressed_hits: Sequence[RetrievalHit],
+    source_hits: Sequence[RetrievalHit],
+    *,
+    min_hits: int = 3,
+) -> List[RetrievalHit]:
+    expanded = list(compressed_hits)
+    if len(expanded) >= min_hits:
+        return expanded
+
+    seen = {
+        (hit.chunk.document_id, hit.chunk.id)
+        for hit in expanded
+    }
+    for hit in source_hits:
+        key = (hit.chunk.document_id, hit.chunk.id)
+        if key in seen:
+            continue
+        expanded.append(deepcopy(hit))
+        seen.add(key)
+        if len(expanded) >= min_hits:
+            break
+    return expanded
 
 
 class AdvancedRAGStrategy(NaiveRAGStrategy):
@@ -260,16 +317,6 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
         )
         self._validate_hits(fused_hits, kb_id)
         raw_count = sum(sum(report.hit_counts.values()) for report in reports)
-        filtered_hits = [
-            hit
-            for hit in fused_hits
-            if hit.score >= settings["score_threshold"]
-        ]
-        dropped_by_score = len(fused_hits) - len(filtered_hits)
-        if dropped_by_score:
-            warnings.append(
-                f"{dropped_by_score} retrieval hit(s) were below score_threshold"
-            )
         count_summary = ";".join(
             f"{label}={report.hit_counts}"
             for label, report in zip(report_labels, reports)
@@ -285,15 +332,13 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
             (
                 f"query_hits={count_summary}, pre_fusion_hits={raw_count}, "
                 f"post_fusion_hits={len(fused_hits)}, "
-                f"score_filtered_hits={len(filtered_hits)}"
+                f"score_threshold={settings['score_threshold']:.2f}"
             ),
         )
 
-        if not filtered_hits:
+        if not fused_hits:
             reason = (
-                "all hits were below score_threshold"
-                if fused_hits
-                else "retriever returned no hits"
+                "retriever returned no hits"
             )
             warnings.append(reason)
             return self._refusal_result(
@@ -302,7 +347,7 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
                 warnings=warnings,
             )
 
-        final_hits = filtered_hits
+        final_hits = fused_hits
         if settings["rerank_enabled"]:
             started_at = datetime.now(timezone.utc)
             started_perf = time.perf_counter()
@@ -324,14 +369,14 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
                     raw = await raw
                 final_hits = self._normalize_stage_hits(
                     raw,
-                    filtered_hits,
+                    fused_hits,
                     kb_id,
                     "reranker",
                 )
                 rerank_status = "success=true"
             except Exception as exc:
                 warnings.append(self._degraded_warning("rerank", exc))
-                final_hits = deepcopy(filtered_hits)
+                final_hits = deepcopy(fused_hits)
                 rerank_status = (
                     f"success=false, fallback=pre_rerank, "
                     f"error={type(exc).__name__}"
@@ -342,6 +387,27 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
                 started_perf,
                 f"before_top={before}",
                 f"{rerank_status}, after_top={_top_ids(final_hits)}",
+            )
+
+        score_threshold = settings["score_threshold"]
+        if score_threshold > 0:
+            before_score = len(final_hits)
+            final_hits = [
+                hit
+                for hit in final_hits
+                if _passes_score_threshold(hit.score, score_threshold)
+            ]
+            dropped_by_score = before_score - len(final_hits)
+            if dropped_by_score:
+                warnings.append(
+                    f"{dropped_by_score} retrieval hit(s) were below score_threshold"
+                )
+        if not final_hits:
+            warnings.append("all hits were below score_threshold")
+            return self._refusal_result(
+                trace=trace,
+                overall_started_perf=overall_started_perf,
+                warnings=warnings,
             )
 
         selection = None
@@ -367,6 +433,13 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
                     kb_id,
                     "compressor",
                 )
+                if _is_synthesis_query(query):
+                    final_hits = self._normalize_stage_hits(
+                        _ensure_synthesis_context(final_hits, before_hits),
+                        before_hits,
+                        kb_id,
+                        "synthesis_context",
+                    )
                 compression_status = "success=true"
             except Exception as exc:
                 warnings.append(self._degraded_warning("compression", exc))
@@ -414,7 +487,7 @@ class AdvancedRAGStrategy(NaiveRAGStrategy):
             if generator is None:
                 raise AdvancedRAGValidationError("context.llm is required")
             generation = await GeneratorAdapter(generator).generate(
-                prompt=build_naive_instruction(query),
+                prompt=build_advanced_instruction(query),
                 context=selection.text,
                 **settings["generator_options"],
             )

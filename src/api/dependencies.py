@@ -7,6 +7,7 @@ FastAPI 依赖注入层。
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Any
 
 from fastapi import Depends
@@ -25,6 +26,12 @@ from src.chat.retry_policy import RetryPolicy
 from src.chat.structured_logger import StructuredLogger
 from src.chat_storage.sqlite_chat_store import SQLiteChatStore
 from src.config.runtime_config import get_runtime_config
+from src.evaluation.multi_mode_runner import (
+    MultiModeEvaluationRunner,
+    build_chunk_evaluation_samples,
+    create_runner,
+)
+from src.evaluation.runner import DEFAULT_DATASET_PATH
 
 
 # ============================================================================
@@ -59,6 +66,12 @@ class RAGService:
     async def query_stream(self, request: Any):
         async for chunk in self._real.query_stream(request):
             yield chunk
+
+    async def evaluation_chunks(self) -> list[Any]:
+        ensure_init = getattr(self._real, "_ensure_init", None)
+        if callable(ensure_init):
+            await ensure_init()
+        return list(getattr(self._real, "chunks", []) or [])
 
 
 # ============================================================================
@@ -199,3 +212,89 @@ PresetServiceDep = Annotated[PresetService, Depends(get_preset_service)]
 ChatSearchServiceDep = Annotated[SearchService, Depends(get_chat_search_service)]
 ChatTokenServiceDep = Annotated[TokenService, Depends(get_chat_token_service)]
 ChatExportServiceDep = Annotated[ExportService, Depends(get_chat_export_service)]
+
+
+class RealtimeEvaluationRunner:
+    """Realtime multi-mode evaluation runner."""
+
+    def __init__(
+        self,
+        rag_service: Any,
+        model_registry: ModelRegistry,
+        *,
+        dataset_path: str = DEFAULT_DATASET_PATH,
+    ) -> None:
+        self._rag_service = rag_service
+        self._model_registry = model_registry
+        self._dataset_path = dataset_path
+        self._runs: dict[str, dict[str, Any]] = {}
+
+    async def run_evaluation(self, request: Any) -> dict:
+        from src.api.routes.evaluation import EvaluationRunRequest
+
+        payload = request if isinstance(request, EvaluationRunRequest) else EvaluationRunRequest(**request)
+        run_id = f"run_{uuid.uuid4().hex[:8]}"
+        model = self._resolve_model(payload.model_id)
+        self._runs[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "kb_id": payload.kb_id,
+            "modes": list(payload.modes),
+            "model_id": model.id,
+            "requested_model_id": payload.model_id,
+            "sample_limit": payload.sample_limit,
+            "message": f"评测已启动，将在 {len(payload.modes)} 种模式下运行",
+        }
+
+        chunks = await self._rag_service.evaluation_chunks()
+        samples = build_chunk_evaluation_samples(
+            chunks,
+            sample_limit=payload.sample_limit,
+        )
+        report = await MultiModeEvaluationRunner(
+            dataset_path=f"dynamic:{payload.kb_id}",
+            modes=payload.modes,
+            sample_limit=payload.sample_limit,
+            samples=samples,
+            runner_factory=lambda mode: create_runner(
+                mode,
+                use_mock=False,
+                service=self._rag_service,
+                kb_id=payload.kb_id,
+                top_k=5,
+                model_config=model.model_dump(),
+            ),
+        ).run()
+        report["run_id"] = run_id
+        report["kb_id"] = payload.kb_id
+        report["model_id"] = model.id
+        report["requested_model_id"] = payload.model_id
+        report["modes"] = list(payload.modes)
+        report["sample_limit"] = payload.sample_limit
+        self._runs[run_id] = report
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "kb_id": payload.kb_id,
+            "modes": list(payload.modes),
+            "model_id": model.id,
+            "sample_limit": payload.sample_limit,
+            "message": f"评测已完成，将在 {len(payload.modes)} 种模式下运行",
+        }
+
+    async def get_result(self, run_id: str) -> dict:
+        result = self._runs.get(run_id)
+        if result is None:
+            raise KeyError(run_id)
+        return result
+
+    def _resolve_model(self, model_id: str | None):
+        if model_id:
+            try:
+                return self._model_registry.get_enabled(model_id)
+            except Exception:
+                pass
+        return self._model_registry.default_model()
+
+
+_eval_runner = RealtimeEvaluationRunner(_rag_service, _model_registry)

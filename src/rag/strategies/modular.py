@@ -108,6 +108,19 @@ _MODULE_DEPENDENCIES: Dict[str, set] = {
     "verify":   set(),  # no hard dependency — generate is always on
 }
 
+_MODULE_LABELS: Dict[str, str] = {
+    "rewrite": "查询改写",
+    "retrieve": "检索",
+    "rerank": "重排",
+    "compress": "压缩",
+    "verify": "校验",
+}
+
+
+def _module_label(name: str) -> str:
+    label = _MODULE_LABELS.get(name)
+    return f"{name}（{label}）" if label else name
+
 
 def validate_module_config(config: ModuleConfig) -> List[str]:
     """Return a list of configuration errors.  Empty list means valid.
@@ -124,9 +137,12 @@ def validate_module_config(config: ModuleConfig) -> List[str]:
         if module in enabled:
             missing = deps - enabled
             if missing:
+                missing_text = "、".join(
+                    f"“{_module_label(name)}”" for name in sorted(missing)
+                )
                 errors.append(
-                    f"Module '{module}' requires {sorted(missing)} to be enabled, "
-                    f"but they are disabled"
+                    f"模块“{_module_label(module)}”依赖模块{missing_text}，"
+                    "请先开启依赖模块后再运行。"
                 )
     return errors
 
@@ -408,7 +424,7 @@ class ModularRAGStrategy(RAGStrategy):
         if errors:
             return RAGResult(
                 answer="",
-                warnings=[f"Invalid pipeline configuration: {'; '.join(errors)}"],
+                warnings=[f"配置错误：{'；'.join(errors)}"],
             )
 
         # ── Get trace recorder ───────────────────────────────────────

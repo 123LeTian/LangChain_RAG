@@ -306,3 +306,66 @@ async def test_model_identity_question_uses_current_model_without_rag():
     assert events[-1]["type"] == "done"
     assert "deepseek-v4-pro" in events[-1]["content"]
     assert events[-1]["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_direct_mode_uses_selected_llm_without_rag(monkeypatch):
+    class RecordingRAG:
+        def __init__(self):
+            self.called = False
+
+        async def query(self, request):
+            self.called = True
+            raise AssertionError("direct mode should not call RAG")
+
+    class FakeChunk:
+        content = "direct answer"
+
+    class FakeLLM:
+        def __init__(self):
+            self.prompts: List[str] = []
+
+        def stream(self, prompt: str):
+            self.prompts.append(prompt)
+            yield FakeChunk()
+
+    fake_llm = FakeLLM()
+
+    def fake_create_chat_model(self, model_config, **kwargs):
+        assert model_config.id == "custom-direct"
+        assert kwargs["streaming"] is True
+        return fake_llm
+
+    monkeypatch.setattr(
+        "src.chat.llm_client_factory.LLMClientFactory.create_chat_model",
+        fake_create_chat_model,
+    )
+
+    rag = RecordingRAG()
+    gateway = RAGGateway(rag)
+    model = ChatModel(
+        id="custom-direct",
+        provider="openai",
+        display_name="Custom Direct",
+        model_name="custom-direct-model",
+        base_url="https://api.example.test/v1",
+        api_key_env="CUSTOM_DIRECT_API_KEY",
+    )
+
+    events = [
+        event
+        async for event in gateway.stream(
+            session_id="session-1",
+            original_question="Write a short greeting",
+            context_enhanced_question="Write a short greeting",
+            model_id=model.id,
+            model_config=model,
+            rag_mode="direct",
+        )
+    ]
+
+    assert rag.called is False
+    assert fake_llm.prompts == ["Write a short greeting"]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["content"] == "direct answer"
+    assert events[-1]["citations"] == []

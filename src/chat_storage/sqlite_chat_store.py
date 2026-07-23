@@ -397,7 +397,7 @@ class SQLiteChatStore:
                 FROM chat_messages m
                 JOIN chat_sessions s ON s.id = m.session_id
                 WHERE {where_sql}
-                ORDER BY m.created_at DESC, m.id DESC
+                ORDER BY m.created_at DESC, m.rowid DESC
                 LIMIT ? OFFSET ?
                 """,
                 tuple([*params, limit, offset]),

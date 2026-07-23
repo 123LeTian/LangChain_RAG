@@ -35,6 +35,13 @@ STOPWORDS = {
     "explain",
     "summarize",
     "overview",
+    "\u54ea\u4e9b",
+    "\u4ec0\u4e48",
+    "\u5173\u7cfb",
+    "\u4e4b\u95f4",
+    "\u5206\u522b",
+    "\u5b83\u4eec",
+    "\u8bf7",
 }
 
 GLOBAL_SCOPE_HINTS = {
@@ -44,6 +51,21 @@ GLOBAL_SCOPE_HINTS = {
     "趋势",
     "概括",
     "总结",
+    "经营重点",
+    "经营优势",
+    "重点板块",
+    "板块",
+    "主线",
+    "逻辑",
+    "归纳",
+    "支撑",
+    "长期发展",
+    "说明",
+    "体现",
+    "意味着",
+    "成果",
+    "影响",
+    "表明",
     "summarize",
     "summary",
     "overall",
@@ -127,17 +149,31 @@ class GraphRetriever:
             )
 
         tokens = _query_tokens(query)
+        intent = _query_intent(query)
         hits = []
         for entity in entities:
             score, matched_text, reason = _entity_score(entity, tokens, query)
-            if score <= 0:
-                continue
             related = [
                 relationship
                 for relationship in relationships
                 if relationship.source_entity_id == entity.id
                 or relationship.target_entity_id == entity.id
             ]
+            relationship_score, relationship_reason, relationship_match = _relationships_score(
+                related,
+                tokens,
+                query,
+            )
+            score += relationship_score
+            if relationship_reason:
+                reason = "; ".join(part for part in [reason, relationship_reason] if part)
+                matched_text = matched_text or relationship_match
+            intent_score, intent_reason = _intent_score(entity, related, intent)
+            score += intent_score
+            if intent_reason:
+                reason = "; ".join(part for part in [reason, intent_reason] if part)
+            if score <= 0:
+                continue
             neighbors = _neighbor_entities(entity, related, entities)
             source_refs = _dedupe_source_refs(
                 [
@@ -237,6 +273,44 @@ class GraphRetriever:
             key=lambda hit: (hit.score, len(hit.source_refs), hit.title.lower()),
             reverse=True,
         )
+        if not hits:
+            fallback_reports = [
+                report
+                for report in sorted(
+                    reports,
+                    key=lambda item: (
+                        _report_quality_score(item),
+                        len(item.source_refs),
+                        len(item.key_relationships),
+                        len(item.key_entities),
+                    ),
+                    reverse=True,
+                )
+                if _report_quality_score(report) > 0
+            ]
+            hits = [
+                GraphGlobalSearchHit(
+                    community_id=report.community_id,
+                    report_id=report.id,
+                    title=report.title,
+                    summary=report.summary,
+                    score=round(
+                        0.1
+                        + _report_quality_score(report) * 0.01
+                        + min(len(report.source_refs), 5) * 0.01,
+                        6,
+                    ),
+                    key_entities=list(report.key_entities),
+                    key_relationships=list(report.key_relationships),
+                    source_refs=list(report.source_refs),
+                    metadata={
+                        "graph_scope": "global",
+                        "score_reason": "global_fallback_no_keyword_match",
+                        "quality_score": _report_quality_score(report),
+                    },
+                )
+                for report in fallback_reports[:top_k]
+            ]
         warnings = [] if hits else ["no matching community reports found"]
         return GraphGlobalSearchResult(
             query=query,
@@ -301,6 +375,31 @@ def resolve_graph_scope(query: str, scope: str = "auto") -> str:
     if normalized_scope != "auto":
         return normalized_scope
     query_lower = str(query or "").lower()
+    chinese_global_hints = {
+        "\u6574\u4f53",
+        "\u603b\u4f53",
+        "\u4e3b\u9898",
+        "\u8d8b\u52bf",
+        "\u6982\u62ec",
+        "\u603b\u7ed3",
+        "\u91cd\u8981\u4e8b\u9879",
+        "\u7ecf\u8425\u91cd\u70b9",
+        "\u7ecf\u8425\u4f18\u52bf",
+        "\u4e3b\u7ebf",
+        "\u677f\u5757",
+        "\u903b\u8f91",
+        "\u5f52\u7eb3",
+        "\u652f\u6491",
+        "\u957f\u671f\u53d1\u5c55",
+        "\u8bf4\u660e",
+        "\u4f53\u73b0",
+        "\u610f\u5473",
+        "\u6210\u679c",
+        "\u5f71\u54cd",
+        "\u8868\u660e",
+    }
+    if any(hint in query_lower for hint in chinese_global_hints):
+        return "global"
     if any(hint in query_lower for hint in GLOBAL_SCOPE_HINTS):
         return "global"
     return "local"
@@ -318,11 +417,39 @@ def _validate_query(query: str, kb_id: str, top_k: int) -> List[str]:
 
 
 def _query_tokens(query: str) -> List[str]:
-    return [
-        token
-        for token in re.findall(r"[\w\u4e00-\u9fff]+", query.lower())
-        if token and token not in STOPWORDS
-    ]
+    tokens: List[str] = []
+    for token in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", query.lower()):
+        if not token or token in STOPWORDS:
+            continue
+        tokens.append(token)
+        if re.fullmatch(r"[\u4e00-\u9fff]+", token) and len(token) > 2:
+            for size in (2, 3, 4):
+                for index in range(0, len(token) - size + 1):
+                    gram = token[index : index + size]
+                    if gram not in STOPWORDS:
+                        tokens.append(gram)
+    seen = set()
+    unique = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        unique.append(token)
+    return unique
+
+
+def _query_intent(query: str) -> set[str]:
+    text = str(query or "").lower()
+    intent = set()
+    if any(marker in text for marker in {"\u6d41\u7a0b", "\u6b65\u9aa4", "\u73af\u8282", "process", "step"}):
+        intent.add("process")
+    if any(marker in text for marker in {"\u6e20\u9053", "\u4e3b\u4f53", "\u9500\u552e", "channel"}):
+        intent.add("channel")
+    if any(marker in text for marker in {"\u5305\u62ec", "\u5305\u542b", "\u54ea\u4e9b", "include", "contain"}):
+        intent.add("contains")
+    if any(marker in text for marker in {"\u5173\u7cfb", "\u4e4b\u95f4", "\u5148\u540e", "relationship", "relation"}):
+        intent.add("relationship")
+    return intent
 
 
 def _entity_score(
@@ -345,12 +472,87 @@ def _entity_score(
             score += 2.0
             reasons.append(f"query_substring_in_{label}")
             matched_text = matched_text or text
+        if text_lower and len(text_lower) >= 2 and text_lower in normalized_query:
+            score += 2.0
+            reasons.append(f"{label}_substring_in_query")
+            matched_text = matched_text or text
         matched_tokens = [token for token in tokens if token in text_lower]
         if matched_tokens:
             score += len(matched_tokens)
             reasons.append(f"{label}_tokens={','.join(sorted(set(matched_tokens)))}")
             matched_text = matched_text or text
     return score, matched_text or entity.name, "; ".join(reasons)
+
+
+def _intent_score(
+    entity: GraphEntity,
+    relationships: Sequence[GraphRelationship],
+    intent: set[str],
+) -> tuple[float, str]:
+    if not intent:
+        return 0.0, ""
+    entity_name = (entity.name or "").lower()
+    relation_types = {relationship.relation_type for relationship in relationships}
+    descriptions = " ".join(
+        relationship.description or relationship.relation_type
+        for relationship in relationships
+    ).lower()
+    score = 0.0
+    reasons = []
+    if "process" in intent:
+        if "\u6d41\u7a0b" in entity_name or "process" in entity_name:
+            score += 3.0
+            reasons.append("intent_process_entity")
+        if "next_step" in relation_types:
+            score += 2.0
+            reasons.append("intent_process_next_step")
+        if "\u6d41\u7a0b" in descriptions:
+            score += 1.0
+            reasons.append("intent_process_relationship")
+    if "channel" in intent:
+        if "\u6e20\u9053" in entity_name or "channel" in entity_name:
+            score += 2.0
+            reasons.append("intent_channel_entity")
+        if "\u6e20\u9053" in descriptions:
+            score += 1.0
+            reasons.append("intent_channel_relationship")
+    if "contains" in intent and "contains" in relation_types:
+        score += 1.0
+        reasons.append("intent_contains_relationship")
+    if "relationship" in intent and relationships:
+        score += 0.5
+        reasons.append("intent_relationship_present")
+    return score, "; ".join(reasons)
+
+
+def _relationships_score(
+    relationships: Sequence[GraphRelationship],
+    tokens: Sequence[str],
+    query: str,
+) -> tuple[float, str, str]:
+    normalized_query = query.strip().lower()
+    score = 0.0
+    reasons = []
+    matched_text = ""
+    for relationship in relationships:
+        haystacks = {
+            "relationship": relationship.description,
+            "relation_type": relationship.relation_type,
+        }
+        for label, text in haystacks.items():
+            text_lower = (text or "").lower()
+            if not text_lower:
+                continue
+            if normalized_query and normalized_query in text_lower:
+                score += 1.5
+                reasons.append(f"query_substring_in_{label}")
+                matched_text = matched_text or text
+            matched_tokens = [token for token in tokens if len(token) >= 2 and token in text_lower]
+            if matched_tokens:
+                score += min(len(set(matched_tokens)) * 0.25, 2.0)
+                reasons.append(f"{label}_tokens={','.join(sorted(set(matched_tokens))[:6])}")
+                matched_text = matched_text or text
+    return score, "; ".join(reasons), matched_text
 
 
 def _report_score(
@@ -375,6 +577,85 @@ def _report_score(
             score += len(set(matched_tokens))
             reasons.append(f"{label}_tokens={','.join(sorted(set(matched_tokens)))}")
     return score, "; ".join(reasons)
+
+
+def _report_quality_score(report: CommunityReport) -> int:
+    labels = [
+        *_split_report_title(report.title),
+        *[str(entity) for entity in report.key_entities],
+        *[str(relationship) for relationship in report.key_relationships],
+    ]
+    meaningful_labels = [
+        label for label in labels if _label_quality_score(label) > 0
+    ]
+    if not meaningful_labels:
+        return 0
+    score = sum(_label_quality_score(label) for label in meaningful_labels)
+    score += min(len(report.source_refs), 3)
+    score += min(len(report.key_relationships), 2)
+    return score
+
+
+def _split_report_title(title: str) -> List[str]:
+    cleaned = _clean_report_label(title).replace("Community:", "")
+    return [part.strip() for part in cleaned.split(",") if part.strip()]
+
+
+def _clean_report_label(value: Any) -> str:
+    text = str(value or "").replace("Community:", "").strip()
+    text = text.strip(" `\"'.,;:()[]{}")
+    return " ".join(text.split())
+
+
+def _label_quality_score(value: Any) -> int:
+    text = _clean_report_label(value)
+    if not text:
+        return 0
+
+    weak_labels = {
+        "\u4e00",
+        "\u4e8c",
+        "\u4e09",
+        "\u56db",
+        "\u4e94",
+        "\u516d",
+        "\u4e03",
+        "\u516b",
+        "\u4e5d",
+        "\u5341",
+        "\u5f52",
+        "\u4e0a\u5e02",
+        "\u4e0a\u5e02\u516c\u53f8\u80a1\u4e1c\u7684",
+    }
+    if text in weak_labels or len(text) <= 1:
+        return 0
+    if text.endswith("\u7684") and len(text) <= 12:
+        return 0
+    if re.fullmatch(r"[A-Z]{1,5}", text) and text not in {"ESG"}:
+        return 0
+
+    strong_keywords = {
+        "\u54c1\u8d28",
+        "\u8d28\u91cf",
+        "\u54c1\u724c",
+        "\u5e02\u573a",
+        "\u5de5\u827a",
+        "\u751f\u4ea7",
+        "\u6587\u5316",
+        "ESG",
+        "\u6cbb\u7406",
+        "\u5e02\u503c",
+        "\u73af\u5883",
+        "\u751f\u6001",
+        "\u8305\u53f0\u9152",
+        "\u4e3b\u8981\u4e1a\u52a1",
+    }
+    score = 1
+    if any(keyword in text for keyword in strong_keywords):
+        score += 4
+    if len(text) >= 4:
+        score += 1
+    return score
 
 
 def _neighbor_entities(

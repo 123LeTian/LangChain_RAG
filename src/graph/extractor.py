@@ -82,34 +82,34 @@ class RuleBasedGraphExtractor(GraphExtractor):
         relationships: Dict[str, GraphRelationship] = {}
 
         for sentence in _sentences(text):
-            relation = _extract_relation(sentence)
-            if relation is None:
+            extracted_relations = _extract_relations(sentence)
+            if not extracted_relations:
                 for name in _extract_entity_mentions(sentence):
                     entity = _entity(name, source_ref, kb_id)
                     entities[entity.id] = _merge_entity(entities.get(entity.id), entity)
                 continue
 
-            source_name, relation_type, target_name = relation
-            source_entity = _entity(source_name, source_ref, kb_id)
-            target_entity = _entity(target_name, source_ref, kb_id)
-            entities[source_entity.id] = _merge_entity(
-                entities.get(source_entity.id), source_entity
-            )
-            entities[target_entity.id] = _merge_entity(
-                entities.get(target_entity.id), target_entity
-            )
-            relationship = _relationship(
-                source_entity.id,
-                target_entity.id,
-                relation_type,
-                source_ref,
-                kb_id,
-                source_name,
-                target_name,
-            )
-            relationships[relationship.id] = _merge_relationship(
-                relationships.get(relationship.id), relationship
-            )
+            for source_name, relation_type, target_name in extracted_relations:
+                source_entity = _entity(source_name, source_ref, kb_id)
+                target_entity = _entity(target_name, source_ref, kb_id)
+                entities[source_entity.id] = _merge_entity(
+                    entities.get(source_entity.id), source_entity
+                )
+                entities[target_entity.id] = _merge_entity(
+                    entities.get(target_entity.id), target_entity
+                )
+                relationship = _relationship(
+                    source_entity.id,
+                    target_entity.id,
+                    relation_type,
+                    source_ref,
+                    kb_id,
+                    source_name,
+                    target_name,
+                )
+                relationships[relationship.id] = _merge_relationship(
+                    relationships.get(relationship.id), relationship
+                )
 
         return GraphExtractionResult(
             entities=list(entities.values()),
@@ -185,11 +185,208 @@ def _source_ref(chunk_data: Mapping[str, Any]) -> GraphSourceRef:
 
 
 def _sentences(text: str) -> List[str]:
+    normalized = _normalize_pdf_text(text)
     return [
         sentence.strip()
-        for sentence in re.split(r"[\n。.!?！？;；]+", text)
+        for sentence in re.split(r"[\u3002.!?！？;；]+", normalized)
         if sentence.strip()
     ]
+
+
+def _normalize_pdf_text(text: str) -> str:
+    normalized = str(text or "")
+    normalized = re.sub(
+        r"(?<=[\u4e00-\u9fff])[\s\r\n]+(?=[\u4e00-\u9fff])",
+        "",
+        normalized,
+    )
+    normalized = re.sub(r"[\r\n]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_relations(sentence: str) -> List[Tuple[str, str, str]]:
+    relations = [
+        *_extract_chinese_channel_relations(sentence),
+        *_extract_chinese_process_relations(sentence),
+        *_extract_chinese_list_relations(sentence),
+    ]
+    if relations:
+        return _dedupe_relations(relations)
+    relation = _extract_relation(sentence)
+    return [relation] if relation is not None else []
+
+
+def _extract_chinese_channel_relations(sentence: str) -> List[Tuple[str, str, str]]:
+    text = sentence.strip()
+    relations: List[Tuple[str, str, str]] = []
+
+    sales_match = re.search(
+        (
+            r"\u9500\u552e\u6a21\u5f0f.*?\u901a\u8fc7"
+            r"(.+?)\u8fdb\u884c\u9500\u552e"
+        ),
+        text,
+    )
+    if sales_match:
+        for channel in _split_chinese_items(sales_match.group(1)):
+            channel_name = channel if channel.endswith("\u6e20\u9053") else f"{channel}\u6e20\u9053"
+            relations.append(("\u9500\u552e\u6a21\u5f0f", "contains", channel_name))
+
+    for clause in re.split(r"[\u3002\uff0c,;；]+", text):
+        definition_match = re.search(
+            (
+                r"([\u4e00-\u9fffA-Za-z0-9\s\u201c\u201d\"'iI]+?\u6e20\u9053)"
+                r"\s*(?:\u6307|\u5305\u62ec)\s*(.+)$"
+            ),
+            clause.strip(),
+        )
+        if definition_match:
+            source = _clean_entity_text(definition_match.group(1))
+            for item in _split_chinese_items(definition_match.group(2)):
+                relations.append((source, "contains", item))
+
+    return [
+        relation
+        for relation in relations
+        if relation[0]
+        and relation[2]
+        and normalize_entity_name(relation[0]) != normalize_entity_name(relation[2])
+    ]
+
+
+def _split_chinese_items(value: str) -> List[str]:
+    text = str(value or "").strip()
+    text = re.sub(
+        r"\s*\u7b49\s*(?:\u6570\u5b57\u8425\u9500\u5e73\u53f0)?\u6e20\u9053\s*$",
+        "",
+        text,
+    )
+    text = re.sub(r"\s*\u7b49\s*$", "", text)
+    text = re.sub(r"\s*\u6e20\u9053\s*$", "", text)
+    text = text.replace("\u201c", "").replace("\u201d", "")
+    text = text.replace('"', "").replace("'", "")
+    parts = re.split(r"\s*(?:\u3001|\uff0c|,|\u548c|\u53ca|\u4e0e|/|\\|;|；)\s*", text)
+    cleaned = []
+    for part in parts:
+        item = _clean_entity_text(part)
+        if not item:
+            continue
+        if item in {"\u6e20\u9053", "\u7b49", "\u4e0e"}:
+            continue
+        cleaned.append(item)
+    return cleaned
+
+
+def _extract_chinese_process_relations(sentence: str) -> List[Tuple[str, str, str]]:
+    text = sentence.strip()
+    relations: List[Tuple[str, str, str]] = []
+    for match in re.finditer(
+        (
+            r"([\u4e00-\u9fffA-Za-z0-9\s]{2,40}?(?:\u5de5\u827a\u6d41\u7a0b|\u6d41\u7a0b))"
+            r"\s*(?:\u4e3a|\u5305\u62ec|[:\uff1a])\s*"
+            r"([^\u3002\uff1b;]+)"
+        ),
+        text,
+    ):
+        process_name = _clean_entity_text(match.group(1))
+        steps = _split_chinese_flow_steps(match.group(2))
+        if len(steps) < 2:
+            continue
+        for step in steps:
+            relations.append((process_name, "contains", step))
+        for current_step, next_step in zip(steps, steps[1:]):
+            relations.append((current_step, "next_step", next_step))
+    return [
+        relation
+        for relation in relations
+        if relation[0]
+        and relation[2]
+        and normalize_entity_name(relation[0]) != normalize_entity_name(relation[2])
+    ]
+
+
+def _extract_chinese_list_relations(sentence: str) -> List[Tuple[str, str, str]]:
+    text = sentence.strip()
+    relations: List[Tuple[str, str, str]] = []
+    patterns = [
+        (
+            r"([\u4e00-\u9fffA-Za-z0-9\s]{2,40}?)"
+            r"\s*(?:\u5305\u62ec|\u5305\u542b|\u5206\u4e3a|\u5206\u6210|\u4e3b\u8981\u6709|\u6d89\u53ca)\s*"
+            r"([^\u3002\uff1b;]+)"
+        ),
+        (
+            r"([\u4e00-\u9fffA-Za-z0-9\s]{2,40}?)"
+            r"\s*\u7531\s*([^\u3002\uff1b;]+?)\s*(?:\u6784\u6210|\u7ec4\u6210)"
+        ),
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            source = _clean_entity_text(match.group(1))
+            if _is_weak_chinese_source(source):
+                continue
+            items = _split_chinese_items(match.group(2))
+            if len(items) < 2:
+                continue
+            for item in items:
+                relations.append((source, "contains", item))
+    return [
+        relation
+        for relation in relations
+        if relation[0]
+        and relation[2]
+        and normalize_entity_name(relation[0]) != normalize_entity_name(relation[2])
+    ]
+
+
+def _split_chinese_flow_steps(value: str) -> List[str]:
+    text = str(value or "").strip()
+    text = re.sub(r"\s*(?:\u7b49)?(?:\u73af\u8282|\u6b65\u9aa4)?\s*$", "", text)
+    parts = re.split(
+        r"\s*(?:\u2014|\u2013|\u2192|->|\u3001|\uff0c|,|\u81f3|\u5230|\u7136\u540e|\u518d)\s*",
+        text,
+    )
+    steps: List[str] = []
+    seen = set()
+    for part in parts:
+        step = _clean_entity_text(part)
+        if not step or step in seen:
+            continue
+        if len(step) > 20:
+            continue
+        seen.add(step)
+        steps.append(step)
+    return steps
+
+
+def _is_weak_chinese_source(value: str) -> bool:
+    text = _clean_entity_text(value)
+    if len(text) < 2 or len(text) > 40:
+        return True
+    weak_suffixes = {
+        "\u4e3a",
+        "\u662f",
+        "\u6307",
+        "\u548c",
+        "\u4e0e",
+        "\u53ca",
+    }
+    return text in weak_suffixes
+
+
+def _dedupe_relations(relations: Iterable[Tuple[str, str, str]]) -> List[Tuple[str, str, str]]:
+    result: List[Tuple[str, str, str]] = []
+    seen = set()
+    for source, relation_type, target in relations:
+        key = (
+            normalize_entity_name(source),
+            relation_type,
+            normalize_entity_name(target),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((source, relation_type, target))
+    return result
 
 
 def _extract_relation(sentence: str) -> Tuple[str, str, str] | None:

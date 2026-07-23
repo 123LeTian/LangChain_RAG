@@ -81,7 +81,7 @@ class AgentWorkflow:
 
         try:
             state = await self._intent_detection(state)
-            state = await self._tool_selection(state)
+            state = await self._tool_selection(state, context)
             state = await self._tool_execution(state, context)
             state = await self._generate(state, context)
             state = await self._verify(state, context)
@@ -112,14 +112,38 @@ class AgentWorkflow:
         }
         return state
 
-    async def _tool_selection(self, state: AgentRunState) -> AgentRunState:
+    async def _tool_selection(
+        self,
+        state: AgentRunState,
+        context: RAGContext,
+    ) -> AgentRunState:
         """Select tools based on the classified intent."""
         if state.is_max_steps_exceeded:
             return state
 
         state.record_step("tool_selection")
         result = self._router.route(state.query)
-        state.selected_tools = list(result.tools)
+        routed_tools = list(result.tools)
+        available_tools = set(_get_registry_names(context))
+        selected_tools = [tool for tool in routed_tools if tool in available_tools]
+        if not selected_tools:
+            selected_tools = [
+                tool
+                for tool in ("vector_search", "graph_search", "document_summary")
+                if tool in available_tools
+            ][:1]
+        if (
+            "graph_search" in selected_tools
+            and "document_summary" in available_tools
+            and "document_summary" not in selected_tools
+        ):
+            selected_tools.append("document_summary")
+        state.selected_tools = selected_tools
+        state.tool_results["__tool_selection__"] = {
+            "routed_tools": routed_tools,
+            "available_tools": sorted(available_tools),
+            "filtered_tools": selected_tools,
+        }
         return state
 
     async def _tool_execution(self, state: AgentRunState, context: RAGContext) -> AgentRunState:
@@ -147,12 +171,21 @@ class AgentWorkflow:
 
             state.record_step(f"tool_execution:{tool_name}")
             kwargs: Dict[str, Any] = {"query": state.query}
+            top_k = getattr(context, "config", {}).get("top_k")
+            if tool_name in {"vector_search", "graph_search"} and top_k is not None:
+                kwargs["top_k"] = top_k
 
             # Build tool-specific arguments
             if tool_name == "document_summary":
-                vs_data = state.tool_results.get("vector_search")
-                if isinstance(vs_data, list):
-                    kwargs["chunks"] = vs_data
+                chunks: List[Any] = []
+                for key in ("vector_search", "graph_search"):
+                    data = state.tool_results.get(key)
+                    if isinstance(data, list):
+                        chunks.extend(data)
+                    elif isinstance(data, dict) and isinstance(data.get("chunks"), list):
+                        chunks.extend(data["chunks"])
+                if chunks:
+                    kwargs["chunks"] = chunks
             elif tool_name == "answer_verify":
                 kwargs["answer"] = state.final_answer or ""
                 all_chunks = []
@@ -183,13 +216,28 @@ class AgentWorkflow:
                 state.errors.append(f"graph_search failed (degrading to vector_search): {result.error}")
                 _record_error(context, "graph_search", result.error or "unknown")
 
+                if "vector_search" not in _get_registry_names(context):
+                    tool_failures += 1
+                    state.tool_results["graph_search"] = None
+                    state.errors.append(
+                        "vector_search fallback skipped because Vector Tool is disabled"
+                    )
+                    continue
+
                 # Fallback: try vector_search
                 try:
-                    fb_result = await executor.execute("vector_search", query=state.query)
+                    fb_kwargs: Dict[str, Any] = {"query": state.query}
+                    if top_k is not None:
+                        fb_kwargs["top_k"] = top_k
+                    fb_result = await executor.execute("vector_search", **fb_kwargs)
                     # Record the fallback call (criterion 3)
                     state.tool_calls.append({
                         "tool_name": "vector_search",
-                        "params_summary": f"query={state.query[:60]}, top_k=5 (fallback from graph_search)",
+                        "params_summary": (
+                            f"query={state.query[:60]}, "
+                            f"top_k={fb_kwargs.get('top_k', 5)} "
+                            "(fallback from graph_search)"
+                        ),
                         "result_summary": _summarise_tool_result(fb_result),
                         "duration_ms": fb_result.duration_ms,
                         "error": fb_result.error,
@@ -273,7 +321,10 @@ class AgentWorkflow:
         if context.llm is not None:
             try:
                 answer = await context.llm.generate(
-                    prompt="You are a helpful assistant. Answer the query based on the provided context.",
+                    prompt=(
+                        "You are a helpful assistant. Answer the user's query based "
+                        f"on the provided context.\n\nQuery: {state.query}"
+                    ),
                     context=combined_context,
                 )
             except Exception as exc:
@@ -324,11 +375,7 @@ class AgentWorkflow:
         if executor is None or "answer_verify" not in _get_registry_names(context):
             return state  # Skip verification if not available
 
-        all_chunks = []
-        for key in ("vector_search", "graph_search"):
-            val = state.tool_results.get(key)
-            if isinstance(val, list):
-                all_chunks.extend(val)
+        all_chunks = _collect_verification_chunks(state)
 
         try:
             result = await executor.execute(
@@ -346,6 +393,36 @@ class AgentWorkflow:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _collect_verification_chunks(state: AgentRunState) -> List[Dict[str, Any]]:
+    """Collect retrieval and summary context for answer verification."""
+    chunks: List[Dict[str, Any]] = []
+    for key in ("vector_search", "graph_search", "document_summary"):
+        val = state.tool_results.get(key)
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict):
+                    chunks.append(item)
+        elif isinstance(val, dict):
+            nested_chunks = val.get("chunks")
+            if isinstance(nested_chunks, list):
+                for chunk in nested_chunks:
+                    if isinstance(chunk, dict):
+                        chunks.append(chunk)
+            summary = val.get("summary")
+            if summary:
+                chunks.append({
+                    "chunk_id": f"{key}:summary",
+                    "content": str(summary),
+                    "source": key,
+                })
+        elif isinstance(val, str) and val.strip():
+            chunks.append({
+                "chunk_id": f"{key}:text",
+                "content": val,
+                "source": key,
+            })
+    return chunks
 
 
 def _get_executor(context: RAGContext) -> Optional[ToolExecutor]:

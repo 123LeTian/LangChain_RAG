@@ -39,6 +39,7 @@ from src.models.rag import (
     RAGRequest,
     RAGResult,
     RAGSource,
+    TraceEvent,
     TraceStage,
 )
 from src.rag.base import (
@@ -128,12 +129,15 @@ class AgenticRAGStrategy(RAGStrategy):
         retrieval: Optional[RetrieverProtocol] = getattr(context, "retriever", None)
         llm: Any = getattr(context, "llm", None)
         graph: Optional[GraphRetrieverProtocol] = getattr(context, "graph", None)
+        config = getattr(context, "config", {}) or {}
+        vector_enabled = bool(config.get("agent_vector_enabled", True))
+        graph_enabled = bool(config.get("agent_graph_enabled", True))
 
         registry = ToolRegistry()
 
-        if retrieval is not None:
+        if retrieval is not None and vector_enabled:
             registry.register(VectorSearchTool(retrieval))
-        if graph is not None:
+        if graph is not None and graph_enabled:
             registry.register(GraphSearchTool(graph))
         if llm is not None:
             registry.register(DocumentSummaryTool(llm))
@@ -179,7 +183,10 @@ class AgenticRAGStrategy(RAGStrategy):
                             content=content,
                             source=RAGSource(
                                 document_id=doc_id or "unknown",
+                                source_path=item.get("filename"),
+                                page=item.get("page"),
                                 score=score,
+                                metadata=dict(item.get("metadata", {}) or {}),
                             ),
                         ))
             elif isinstance(val, dict) and val.get("chunks"):
@@ -197,7 +204,13 @@ class AgenticRAGStrategy(RAGStrategy):
                         hits.append(RAGChunk(
                             chunk_id=chunk_id or f"chunk_{len(hits)}",
                             content=content,
-                            source=RAGSource(document_id=doc_id or "unknown"),
+                            source=RAGSource(
+                                document_id=doc_id or "unknown",
+                                source_path=chunk.get("filename"),
+                                page=chunk.get("page"),
+                                score=chunk.get("score"),
+                                metadata=dict(chunk.get("metadata", {}) or {}),
+                            ),
                         ))
 
         # Use state.citations if available (from _generate method)
@@ -215,15 +228,7 @@ class AgenticRAGStrategy(RAGStrategy):
                 ))
 
         # ── Record trace ────────────────────────────────────────────────
-        recorder = context.trace_recorder
-        if recorder is not None:
-            try:
-                self._record(context, TraceStage.INTENT,
-                             request_summary(state.query),
-                             f"tools={state.selected_tools}",
-                             (time.perf_counter() - t0) * 1000)
-            except Exception:
-                pass
+        trace = _build_trace(state, trace_id, t0)
 
         # ── Collect warnings ────────────────────────────────────────────
         if state.status == "failed":
@@ -237,6 +242,7 @@ class AgenticRAGStrategy(RAGStrategy):
             answer=answer,
             citations=citations,
             hits=hits,
+            trace=trace,
             warnings=warnings,
             usage=_extract_usage(state),
         )
@@ -256,6 +262,95 @@ def _extract_usage(state: AgentRunState) -> Dict[str, int]:
         "completion": completion_tokens,
         "total": prompt_tokens + completion_tokens,
     }
+
+
+def _build_trace(
+    state: AgentRunState,
+    trace_id: str,
+    t0: float,
+) -> List[TraceEvent]:
+    events: List[TraceEvent] = []
+    intent = state.tool_results.get("__intent__", {})
+    if isinstance(intent, dict):
+        selection = state.tool_results.get("__tool_selection__", {})
+        selection_suffix = ""
+        if isinstance(selection, dict):
+            selection_suffix = (
+                f", routed_tools={selection.get('routed_tools', [])}, "
+                f"available_tools={selection.get('available_tools', [])}"
+            )
+        events.append(TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.INTENT,
+            duration_ms=0.0,
+            input_summary=request_summary(state.query),
+            output_summary=(
+                f"category={intent.get('category', 'unknown')}, "
+                f"confidence={float(intent.get('confidence', 0) or 0):.2f}, "
+                f"selected_tools={state.selected_tools}"
+                f"{selection_suffix}"
+            ),
+        ))
+    else:
+        events.append(TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.INTENT,
+            duration_ms=0.0,
+            input_summary=request_summary(state.query),
+            output_summary=f"selected_tools={state.selected_tools}",
+        ))
+
+    for call in state.tool_calls:
+        tool_name = str(call.get("tool_name", "tool"))
+        events.append(TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.TOOL_CALL,
+            duration_ms=float(call.get("duration_ms") or 0.0),
+            input_summary=(
+                f"tool={tool_name}; "
+                f"{str(call.get('params_summary', ''))[:160]}"
+            ),
+            output_summary=str(
+                call.get("error") or call.get("result_summary") or "ok"
+            )[:240],
+        ))
+
+    events.append(TraceEvent(
+        trace_id=trace_id,
+        stage=TraceStage.GENERATE,
+        duration_ms=0.0,
+        input_summary=(
+            f"tool_results={len([k for k in state.tool_results if not k.startswith('__')])}, "
+            f"steps={len(state.steps)}"
+        ),
+        output_summary=f"Generated {len(state.final_answer or '')} chars",
+    ))
+
+    if "answer_verify" in state.tool_results:
+        verify = state.tool_results.get("answer_verify")
+        if isinstance(verify, dict):
+            summary = (
+                f"passed={verify.get('passed', False)}, "
+                f"issues={len(verify.get('issues', []))}"
+            )
+        else:
+            summary = "skipped or unavailable"
+        events.append(TraceEvent(
+            trace_id=trace_id,
+            stage=TraceStage.VERIFY,
+            duration_ms=0.0,
+            input_summary=f"answer_len={len(state.final_answer or '')}",
+            output_summary=summary,
+        ))
+
+    events.append(TraceEvent(
+        trace_id=trace_id,
+        stage=TraceStage.COMPLETE,
+        duration_ms=round((time.perf_counter() - t0) * 1000, 1),
+        input_summary=f"max_steps={state.max_steps}, actual_steps={state.current_step}",
+        output_summary=f"status={state.status}, errors={len(state.errors)}",
+    ))
+    return events
 
 
 def request_summary(query: str) -> str:

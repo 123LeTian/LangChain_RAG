@@ -68,6 +68,12 @@ def _is_chat_question(query: str) -> bool:
     return any(p in q for p in _CHAT_PATTERNS)
 
 
+def _passes_score_threshold(score: float, threshold: float) -> bool:
+    """Compare using the same two-decimal precision shown in the UI."""
+
+    return round(float(score), 2) >= threshold
+
+
 
 # ====================================================================
 # Module config validation (mirrors C's validate_module_config)
@@ -78,6 +84,19 @@ _MODULE_DEPENDENCIES = {
     "compress": {"retrieve"},
     # verify has no hard dependency - generate is always on
 }
+
+_MODULE_LABELS = {
+    "rewrite": "查询改写",
+    "retrieve": "检索",
+    "rerank": "重排",
+    "compress": "压缩",
+    "verify": "校验",
+}
+
+
+def _module_label(name: str) -> str:
+    label = _MODULE_LABELS.get(name)
+    return f"{name}（{label}）" if label else name
 
 
 def validate_module_config(config: dict) -> list[str]:
@@ -94,9 +113,12 @@ def validate_module_config(config: dict) -> list[str]:
         if module in enabled:
             missing = deps - enabled
             if missing:
+                missing_text = "、".join(
+                    f"“{_module_label(name)}”" for name in sorted(missing)
+                )
                 errors.append(
-                    f"Module '{module}' requires {sorted(missing)} to be enabled, "
-                    f"but they are disabled"
+                    f"模块“{_module_label(module)}”依赖模块{missing_text}，"
+                    "请先开启依赖模块后再运行。"
                 )
     return errors
 
@@ -131,19 +153,136 @@ def _find_best_snippet(text: str, query: str, window: int = 120) -> str:
     suffix = "..." if end < len(text) else ""
     return (prefix + text[start:end] + suffix).replace("\n", " ")
 
+
+class _AgenticRetrieverAdapter:
+    """Adapt the real HybridRetriever list API to Agentic's RAGContext API."""
+
+    retriever_name = "hybrid"
+
+    def __init__(self, retriever: Any, *, kb_id: str) -> None:
+        self._retriever = retriever
+        self._kb_id = kb_id
+
+    def retrieve(self, query: str, top_k: int = 5, **kwargs: Any):
+        from src.models.rag import RAGChunk, RAGContext, RAGSource
+
+        hits = self._retriever.retrieve(query, top_k)
+        chunks = []
+        for hit in hits:
+            chunk = hit.chunk
+            metadata = dict(getattr(chunk, "metadata", {}) or {})
+            metadata.update(dict(getattr(hit, "metadata", {}) or {}))
+            chunks.append(
+                RAGChunk(
+                    chunk_id=chunk.id,
+                    content=chunk.text,
+                    source=RAGSource(
+                        document_id=chunk.document_id,
+                        chunk_index=chunk.index,
+                        source_path=metadata.get("filename"),
+                        title=metadata.get("section") or metadata.get("filename"),
+                        page=metadata.get("page"),
+                        score=float(hit.score),
+                        metadata={
+                            **metadata,
+                            "rank": hit.rank,
+                            "retriever": getattr(hit, "retriever", self.retriever_name),
+                        },
+                    ),
+                )
+            )
+        return RAGContext(
+            query=query,
+            chunks=chunks,
+            retrieval_method=self.retriever_name,
+            total_candidates=len(chunks),
+            metadata={"kb_id": self._kb_id},
+        )
+
+
+class _AgenticGraphAdapter:
+    """Ensure Agentic graph tool uses the initialized real graph KB."""
+
+    def __init__(self, graph_retriever: Any, *, kb_id: str) -> None:
+        self._graph_retriever = graph_retriever
+        self._kb_id = kb_id
+
+    def graph_search(self, query: str, top_k: int = 5, **kwargs: Any):
+        from src.graph.retriever import resolve_graph_scope
+
+        graph_scope = str(
+            kwargs.pop("graph_scope", None)
+            or kwargs.pop("scope", None)
+            or resolve_graph_scope(query, "auto")
+        )
+        return self._graph_retriever.graph_search(
+            query=query,
+            top_k=top_k,
+            kb_id=self._kb_id,
+            graph_scope=graph_scope,
+            **kwargs,
+        )
+
+    def get_entity(self, entity_id: str):
+        return self._graph_retriever.get_entity(entity_id, kb_id=self._kb_id)
+
+    def get_community_report(self, community_id: str):
+        return self._graph_retriever.get_community_report(
+            community_id,
+            kb_id=self._kb_id,
+        )
+
+
+class _AgenticLLMAdapter:
+    """Expose async generate() for AgentWorkflow while reusing chat invoke()."""
+
+    def __init__(self, llm: Any) -> None:
+        self._llm = llm
+        self.last_usage: dict[str, int] = {}
+
+    async def generate(self, prompt: str, context: str, **kwargs: Any) -> str:
+        full_prompt = f"{prompt}\n\nContext:\n{context}"
+        response = await asyncio.to_thread(self._llm.invoke, full_prompt)
+        self._capture_usage(response)
+        return getattr(response, "content", str(response))
+
+    async def generate_with_tokens(
+        self,
+        prompt: str,
+        context: str,
+        **kwargs: Any,
+    ) -> tuple[str, dict[str, int]]:
+        answer = await self.generate(prompt, context, **kwargs)
+        return answer, dict(self.last_usage)
+
+    def _capture_usage(self, response: Any) -> None:
+        usage = getattr(response, "usage_metadata", None) or {}
+        self.last_usage = {
+            "prompt": int(usage.get("prompt_tokens", 0) or 0),
+            "completion": int(usage.get("completion_tokens", 0) or 0),
+            "total": int(usage.get("total_tokens", 0) or 0),
+        }
+
+
 class RealRAGService:
     """Real RAG service with lazy non-blocking initialization."""
 
     def __init__(self):
         self._initialized = False
-        self._init_lock = asyncio.Lock()
+        self._init_lock: asyncio.Lock | None = None
         self.llm = None
         self.retriever = None
         self.reranker = None
         self.compressor = None
         self.citation_builder = None
         self.build_naive_prompt = None
+        self.build_advanced_prompt = None
         self.query_rewriter = None
+        self.chunks = []
+        self.graph_kb_id = "kb-1"
+        self.graph_builder = None
+        self.graph_retriever = None
+        self.graph_strategy = None
 
     def _do_init(self):
         from src.ingestion import LoaderFactory
@@ -153,9 +292,7 @@ class RealRAGService:
             HuggingFaceEmbedder, InMemoryVectorIndex, HybridRetriever,
             SimpleReranker, ContextCompressor, CitationBuilder,
         )
-        from src.rag.naive_support import build_naive_prompt
-        from langchain_openai import ChatOpenAI
-        from src.api.llm_query_rewriter import LLMQueryRewriter
+        from src.rag.naive_support import build_advanced_prompt, build_naive_prompt
 
         project_root = Path(__file__).resolve().parents[2]
         docs_dir = project_root / "documents"
@@ -201,30 +338,42 @@ class RealRAGService:
             )
 
         chunks = [_doc_to_chunk(d) for d in chunks_docs]
+        self.chunks = chunks
         print(f"[RAG] Embedding {len(chunks)} chunks (this takes a while)...", flush=True)
         index = InMemoryVectorIndex(embedder)
         index.add_chunks(chunks)
         print(f"[RAG]   Indexed {index.count()} chunks", flush=True)
+
+        print("[RAG] Building GraphRAG index...", flush=True)
+        from src.graph.builder import GraphIndexBuilder
+        from src.graph.retriever import GraphRetriever
+        from src.rag.strategies.graph_rag import GraphRAGStrategy
+
+        builder = GraphIndexBuilder()
+        graph_result = builder.build_from_chunks(kb_id=self.graph_kb_id, chunks=chunks)
+        self.graph_builder = builder
+        self.graph_retriever = GraphRetriever(builder.repository)
+        self.graph_strategy = GraphRAGStrategy(self.graph_retriever)
+        print(
+            "[RAG]   Graph indexed "
+            f"{graph_result.entity_count} entities, "
+            f"{graph_result.relationship_count} relationships, "
+            f"{graph_result.report_count} reports",
+            flush=True,
+        )
 
         self.retriever = HybridRetriever(embedder, index, alpha=0.3)
         self.reranker = SimpleReranker()
         self.compressor = ContextCompressor(max_tokens=1000)
         self.citation_builder = CitationBuilder()
         self.build_naive_prompt = build_naive_prompt
-
-        self.llm = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-            temperature=0.3,
-            max_tokens=1000,
-        )
-
-        self.query_rewriter = LLMQueryRewriter(llm=self.llm)
+        self.build_advanced_prompt = build_advanced_prompt
         self._initialized = True
         print(f"[RAG] Initialization complete!", flush=True)
 
     async def _ensure_init(self):
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
         async with self._init_lock:
             if self._initialized:
                 return
@@ -232,19 +381,68 @@ class RealRAGService:
             print("[RAG] Starting initialization (in background thread)...", flush=True)
             await asyncio.to_thread(self._do_init)
 
-    def _create_llm(self):
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-            api_key=os.getenv("DEEPSEEK_API_KEY"),
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-            temperature=0.7,
-            max_tokens=1000,
+    def _request_model_config(self, request: Any) -> Any:
+        options = getattr(request, "options", {}) or {}
+        return options.get("model") if isinstance(options, dict) else None
+
+    def _request_temperature(self, request: Any, default: float) -> float:
+        options = getattr(request, "options", {}) or {}
+        if not isinstance(options, dict):
+            return default
+        value = options.get("temperature")
+        return default if value is None else float(value)
+
+    def _score_threshold(self, options: dict[str, Any]) -> float:
+        value = options.get("score_threshold", 0.0)
+        if value is None:
+            return 0.0
+        threshold = float(value)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("score_threshold must be between 0 and 1")
+        return threshold
+
+    def _create_llm(
+        self,
+        model_config: Any = None,
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 1000,
+    ):
+        from src.chat.llm_client_factory import LLMClientFactory
+
+        return LLMClientFactory().create_chat_model(
+            model_config,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
 
     def _parse_config(self, request: Any) -> dict:
         """Extract 5-module config from request.options with defaults."""
         options = getattr(request, "options", {}) or {}
+        mode = getattr(request, "mode", RAGMode.NAIVE)
+        mode_value = getattr(mode, "value", mode)
+        if mode_value == RAGMode.NAIVE.value:
+            return {
+                "rewrite":  False,
+                "retrieve": options.get("retrieve_enabled", True),
+                "rerank":   False,
+                "compress": False,
+                "verify":   False,
+                "top_k":          options.get("top_k", 10),
+                "rerank_top_k":   options.get("rerank_top_k", 5),
+                "score_threshold": self._score_threshold(options),
+            }
+        if mode_value == RAGMode.ADVANCED.value:
+            return {
+                "rewrite":  True,
+                "retrieve": True,
+                "rerank":   True,
+                "compress": True,
+                "verify":   options.get("verify_enabled", False),
+                "top_k":          options.get("top_k", 10),
+                "rerank_top_k":   options.get("rerank_top_k", 5),
+                "score_threshold": self._score_threshold(options),
+            }
         return {
             "rewrite":  options.get("rewrite_enabled", True),
             "retrieve": options.get("retrieve_enabled", True),
@@ -253,6 +451,7 @@ class RealRAGService:
             "verify":   options.get("verify_enabled", False),
             "top_k":          options.get("top_k", 10),
             "rerank_top_k":   options.get("rerank_top_k", 5),
+            "score_threshold": self._score_threshold(options),
         }
 
     def _build_pipeline_config(self, config: dict) -> dict:
@@ -265,10 +464,11 @@ class RealRAGService:
             "verify":   config["verify"],
             "top_k":    config["top_k"],
             "rerank_top_k": config["rerank_top_k"],
+            "score_threshold": config["score_threshold"],
             "generate": True,  # always on
         }
 
-    async def _run_verify(self, query: str, answer: str, context: str) -> dict:
+    async def _run_verify(self, llm: Any, query: str, answer: str, context: str) -> dict:
         """Verify answer factuality using LLM."""
         verify_prompt = (
             # (translated prompt line)
@@ -280,7 +480,7 @@ class RealRAGService:
             'Reply JSON: {"passed": true/false, "issues": ["issue1", ...]}'
         )
         try:
-            response = await asyncio.to_thread(self.llm.invoke, verify_prompt)
+            response = await asyncio.to_thread(llm.invoke, verify_prompt)
             import json
             text = response.content.strip()
             # Try to extract JSON from response
@@ -297,15 +497,22 @@ class RealRAGService:
         """Process a RAG query with 5 configurable module switches."""
         query_text = request.query if hasattr(request, "query") else str(request)
         mode = request.mode if hasattr(request, "mode") else RAGMode.NAIVE
+        mode_value = getattr(mode, "value", mode)
+        model_config = self._request_model_config(request)
         trace_id = uuid.uuid4().hex[:12]
         events: list[TraceEvent] = []
+
+        if mode_value == RAGMode.GRAPH.value:
+            return await self._query_graph_rag(request)
+        if mode_value == RAGMode.AGENTIC.value:
+            return await self._query_agentic_rag(request)
 
         # --- Parse and validate module config ---
         config = self._parse_config(request)
         errors = validate_module_config(config)
         if errors:
             return RAGResult(
-                answer=f"[Config Error] {'; '.join(errors)}",
+                answer=f"[配置错误] {'；'.join(errors)}",
                 citations=[],
                 hits=[],
                 trace=[],
@@ -331,7 +538,10 @@ class RealRAGService:
         if _is_chat_question(query_text):
             print(f"[RAG] Chat question (no retrieval): {query_text[:50]}", flush=True)
             t0 = time.time()
-            llm = self._create_llm()
+            llm = self._create_llm(
+                model_config,
+                temperature=self._request_temperature(request, 0.7),
+            )
             response = await asyncio.to_thread(llm.invoke, query_text)
             answer = response.content
             events.append(TraceEvent(
@@ -353,6 +563,10 @@ class RealRAGService:
         print(f"[RAG] Document question: {query_text[:50]}", flush=True)
         print(f"[RAG] Config: {pipeline_config}", flush=True)
         await self._ensure_init()
+        llm = self._create_llm(
+            model_config,
+            temperature=self._request_temperature(request, 0.3),
+        )
 
         # Track enabled modules for trace ordering
         active_modules = []
@@ -360,9 +574,11 @@ class RealRAGService:
         # === Module 1: Rewrite (conditional) ===
         rewritten_queries = [query_text]
         if config["rewrite"]:
+            from src.api.llm_query_rewriter import LLMQueryRewriter
+
             active_modules.append("rewrite")
             t0 = time.time()
-            rewritten_queries = await self.query_rewriter.rewrite(query_text, max_queries=3)
+            rewritten_queries = await LLMQueryRewriter(llm=llm).rewrite(query_text, max_queries=3)
             detail["rewritten_queries"] = rewritten_queries
             detail["rewrite_latency_ms"] = round((time.time() - t0) * 1000, 1)
             print(f"[RAG] Rewritten queries: {rewritten_queries}", flush=True)
@@ -413,8 +629,14 @@ class RealRAGService:
                 trace_id=trace_id,
                 stage=TraceStage.RETRIEVE,
                 duration_ms=round((time.time() - t0) * 1000, 1),
-                input_summary=f"{len(rewritten_queries)} queries, top_k={config['top_k']}",
-                output_summary=f"pre-rerank Top-{len(hits)}: {pre_summary}",
+                input_summary=(
+                    f"{len(rewritten_queries)} queries, top_k={config['top_k']}, "
+                    f"score_threshold={config['score_threshold']:.2f}"
+                ),
+                output_summary=(
+                    f"requested top_k={config['top_k']}, "
+                    f"pre-rerank candidates={len(hits)}: {pre_summary}"
+                ),
             ))
         else:
             events.append(TraceEvent(
@@ -449,8 +671,11 @@ class RealRAGService:
                 trace_id=trace_id,
                 stage=TraceStage.RERANK,
                 duration_ms=detail["rerank_latency_ms"],
-                input_summary=f"pre-rerank Top-{len(hits)}",
-                output_summary=f"post-rerank Top-{len(reranked)}: {post_summary}",
+                input_summary=(
+                    f"requested top_k={config['top_k']}, "
+                    f"candidate_count={len(hits)}, rerank_top_k={config['rerank_top_k']}"
+                ),
+                output_summary=f"post-rerank candidates={len(reranked)}: {post_summary}",
             ))
             final_hits = reranked
         elif hits:
@@ -465,6 +690,38 @@ class RealRAGService:
             ))
         else:
             final_hits = []
+
+        if final_hits and config["score_threshold"] > 0:
+            before_score_filter = len(final_hits)
+            final_hits = [
+                h
+                for h in final_hits
+                if _passes_score_threshold(h.score, config["score_threshold"])
+            ]
+            score_filtered = before_score_filter - len(final_hits)
+            if score_filtered:
+                events.append(TraceEvent(
+                    trace_id=trace_id,
+                    stage=TraceStage.RETRIEVE,
+                    duration_ms=0.0,
+                    input_summary=(
+                        f"post-rerank candidates={before_score_filter}, "
+                        f"score_threshold={config['score_threshold']:.2f}"
+                    ),
+                    output_summary=(
+                        f"score_filtered={score_filtered}, "
+                        f"remaining={len(final_hits)}"
+                    ),
+                ))
+            detail["post_rerank_top_k"] = [
+                {
+                    "rank": i + 1,
+                    "chunk_id": h.chunk.id,
+                    "score": round(h.score, 4),
+                    "text": h.chunk.text[:120].replace("\n", " "),
+                }
+                for i, h in enumerate(final_hits)
+            ]
 
         # === Module 4: Compress (conditional) ===
         if config["compress"] and final_hits:
@@ -508,7 +765,7 @@ class RealRAGService:
                 retriever="hybrid",
                 metadata=h.chunk.metadata,
             )
-            for h in hits
+            for h in final_hits
         ]
 
         api_citations = [
@@ -524,8 +781,11 @@ class RealRAGService:
         ]
 
         t0 = time.time()
-        prompt = self.build_naive_prompt(query_text, context)
-        response = await asyncio.to_thread(self.llm.invoke, prompt)
+        if mode_value == RAGMode.ADVANCED.value and self.build_advanced_prompt:
+            prompt = self.build_advanced_prompt(query_text, context)
+        else:
+            prompt = self.build_naive_prompt(query_text, context)
+        response = await asyncio.to_thread(llm.invoke, prompt)
         answer = response.content
 
         token_usage = {"total_tokens": len(answer)}
@@ -551,7 +811,7 @@ class RealRAGService:
         if config["verify"]:
             active_modules.append("verify")
             t0 = time.time()
-            verify_result = await self._run_verify(query_text, answer, context)
+            verify_result = await self._run_verify(llm, query_text, answer, context)
             detail["verify_result"] = verify_result
             events.append(TraceEvent(
                 trace_id=trace_id,
@@ -574,6 +834,286 @@ class RealRAGService:
             trace=events,
             usage=token_usage,
             mode=mode,
+        )
+
+    async def _query_graph_rag(self, request: Any) -> RAGResult:
+        """Run the real GraphRAG path: graph_search -> generate -> complete."""
+        from src.models.rag import RAGContext, RAGRequest as InternalRAGRequest
+
+        query_text = request.query if hasattr(request, "query") else str(request)
+        requested_kb_id = getattr(request, "kb_id", None) or "default"
+        options = dict(getattr(request, "options", {}) or {})
+        top_k = int(options.get("top_k", 5))
+        graph_scope = str(options.get("graph_scope", "auto")).lower()
+        graph_options = {
+            "top_k": top_k,
+            "graph_scope": graph_scope,
+        }
+
+        print(
+            f"[RAG] Graph question: {query_text[:50]} "
+            f"(scope={graph_scope}, top_k={top_k})",
+            flush=True,
+        )
+        await self._ensure_init()
+        if self.graph_strategy is None or self.graph_retriever is None:
+            raise RuntimeError("GraphRAG is not initialized")
+
+        graph_warnings: list[str] = []
+        try:
+            llm = self._create_llm(
+                self._request_model_config(request),
+                temperature=self._request_temperature(request, 0.3),
+            )
+        except Exception as exc:
+            llm = None
+            graph_warnings.append(
+                f"graph generation fallback: {type(exc).__name__}"
+            )
+        trace_id = uuid.uuid4().hex[:12]
+        effective_kb_id = self.graph_kb_id
+        context = RAGContext(
+            query=query_text,
+            chunks=[],
+            llm=llm,
+            retrieval_method="graph",
+            metadata={
+                "trace_id": trace_id,
+                "kb_id": effective_kb_id,
+                "requested_kb_id": requested_kb_id,
+            },
+            config={"graph_retriever": self.graph_retriever},
+        )
+        internal_request = InternalRAGRequest(
+            query=query_text,
+            kb_id=effective_kb_id,
+            mode=RAGMode.GRAPH,
+            session_id=getattr(request, "session_id", None),
+            options=graph_options,
+        )
+        result = await self.graph_strategy.run(internal_request, context)
+
+        hit_by_chunk_id = {hit.chunk_id: hit for hit in result.hits}
+        api_hits = [
+            RetrievalHit(
+                chunk_id=hit.chunk_id,
+                text=hit.content[:200],
+                score=float(hit.source.score or 0.0),
+                rank=int(hit.source.metadata.get("rank") or index + 1),
+                retriever="graph",
+                metadata=hit.source.metadata,
+            )
+            for index, hit in enumerate(result.hits)
+        ]
+        api_citations = []
+        for citation in result.citations:
+            hit = hit_by_chunk_id.get(citation.chunk_id)
+            source = hit.source if hit is not None else None
+            api_citations.append(
+                Citation(
+                    document_id=citation.document_id,
+                    chunk_id=citation.chunk_id,
+                    filename=(
+                        source.source_path
+                        if source is not None and source.source_path
+                        else "unknown"
+                    ),
+                    page=source.page if source is not None else None,
+                    quote=citation.text_snippet[:200],
+                    score=float(source.score or 0.0) if source is not None else 0.0,
+                )
+            )
+
+        usage = dict(result.usage or {})
+        usage["detail"] = {
+            "original_query": query_text,
+            "pipeline_config": {
+                "mode": RAGMode.GRAPH.value,
+                "graph_search": True,
+                "top_k": top_k,
+                "graph_scope": graph_scope,
+                "generate": True,
+            },
+            "active_modules": ["graph_search", "generate", "complete"],
+            "requested_kb_id": requested_kb_id,
+            "effective_kb_id": effective_kb_id,
+        }
+        usage["mode"] = RAGMode.GRAPH.value
+
+        return RAGResult(
+            answer=result.answer,
+            citations=api_citations,
+            hits=api_hits,
+            trace=result.trace,
+            usage=usage,
+            warnings=[*graph_warnings, *result.warnings],
+            mode=RAGMode.GRAPH,
+        )
+
+    async def _query_agentic_rag(self, request: Any) -> RAGResult:
+        """Run the real Agentic path: intent -> tool_call(s) -> generate -> verify."""
+        from src.models.rag import RAGContext, RAGRequest as InternalRAGRequest
+        from src.rag.strategies.agentic import AgenticRAGStrategy
+
+        query_text = request.query if hasattr(request, "query") else str(request)
+        requested_kb_id = getattr(request, "kb_id", None) or "default"
+        options = dict(getattr(request, "options", {}) or {})
+        top_k = int(options.get("top_k", 5))
+        max_steps = int(options.get("max_steps", options.get("agent_max_steps", 4)))
+        max_steps = max(4, min(max_steps, 20))
+        vector_enabled = bool(options.get("agent_vector_enabled", True))
+        graph_enabled = bool(options.get("agent_graph_enabled", True))
+
+        if not vector_enabled and not graph_enabled:
+            return RAGResult(
+                answer=(
+                    "[配置错误] Agentic RAG 至少需要开启一个检索工具："
+                    "请开启 Vector Tool 或 Graph Tool 后再运行。"
+                ),
+                citations=[],
+                hits=[],
+                trace=[],
+                usage={
+                    "error": "invalid_config",
+                    "detail": {
+                        "original_query": query_text,
+                        "pipeline_config": {
+                            "mode": RAGMode.AGENTIC.value,
+                            "agent": True,
+                            "top_k": top_k,
+                            "max_steps": max_steps,
+                            "vector_tool": False,
+                            "graph_tool": False,
+                        },
+                    },
+                },
+                mode=RAGMode.AGENTIC,
+            )
+
+        print(
+            f"[RAG] Agentic question: {query_text[:50]} "
+            f"(top_k={top_k}, max_steps={max_steps}, "
+            f"vector={vector_enabled}, graph={graph_enabled})",
+            flush=True,
+        )
+        await self._ensure_init()
+
+        llm = self._create_llm(
+            self._request_model_config(request),
+            temperature=self._request_temperature(request, 0.3),
+        )
+        effective_kb_id = self.graph_kb_id
+        trace_id = uuid.uuid4().hex[:12]
+        context = RAGContext(
+            query=query_text,
+            chunks=[],
+            llm=_AgenticLLMAdapter(llm),
+            retriever=(
+                _AgenticRetrieverAdapter(self.retriever, kb_id=effective_kb_id)
+                if vector_enabled
+                else None
+            ),
+            graph=(
+                _AgenticGraphAdapter(self.graph_retriever, kb_id=effective_kb_id)
+                if graph_enabled and self.graph_retriever is not None
+                else None
+            ),
+            retrieval_method="agentic",
+            metadata={
+                "trace_id": trace_id,
+                "kb_id": effective_kb_id,
+                "requested_kb_id": requested_kb_id,
+            },
+            config={
+                "top_k": top_k,
+                "max_steps": max_steps,
+                "agent_vector_enabled": vector_enabled,
+                "agent_graph_enabled": graph_enabled,
+            },
+        )
+        internal_request = InternalRAGRequest(
+            query=query_text,
+            kb_id=effective_kb_id,
+            mode=RAGMode.AGENTIC,
+            session_id=getattr(request, "session_id", None),
+            options={
+                "top_k": top_k,
+                "max_steps": max_steps,
+                "agent_vector_enabled": vector_enabled,
+                "agent_graph_enabled": graph_enabled,
+            },
+        )
+
+        result = await AgenticRAGStrategy(max_steps=max_steps).run(
+            internal_request,
+            context,
+        )
+
+        api_hits = [
+            RetrievalHit(
+                chunk_id=hit.chunk_id,
+                text=hit.content[:200],
+                score=float(hit.source.score or 0.0),
+                rank=int(hit.source.metadata.get("rank") or index + 1),
+                retriever=str(hit.source.metadata.get("retriever") or "agentic"),
+                metadata=hit.source.metadata,
+            )
+            for index, hit in enumerate(result.hits)
+        ]
+        hit_by_chunk_id = {hit.chunk_id: hit for hit in result.hits}
+        api_citations = []
+        for citation in result.citations:
+            hit = hit_by_chunk_id.get(citation.chunk_id)
+            source = hit.source if hit is not None else None
+            api_citations.append(
+                Citation(
+                    document_id=citation.document_id,
+                    chunk_id=citation.chunk_id,
+                    filename=(
+                        source.source_path
+                        if source is not None and source.source_path
+                        else "unknown"
+                    ),
+                    page=source.page if source is not None else None,
+                    quote=citation.text_snippet[:200],
+                    score=float(source.score or 0.0) if source is not None else 0.0,
+                )
+            )
+
+        usage = dict(result.usage or {})
+        usage["detail"] = {
+            "original_query": query_text,
+            "pipeline_config": {
+                "mode": RAGMode.AGENTIC.value,
+                "agent": True,
+                "top_k": top_k,
+                "max_steps": max_steps,
+                "vector_tool": vector_enabled,
+                "graph_tool": graph_enabled and self.graph_retriever is not None,
+                "generate": True,
+                "verify": True,
+            },
+            "active_modules": [
+                "intent",
+                "tool_selection",
+                "tool_call",
+                "generate",
+                "verify",
+                "complete",
+            ],
+            "requested_kb_id": requested_kb_id,
+            "effective_kb_id": effective_kb_id,
+        }
+        usage["mode"] = RAGMode.AGENTIC.value
+
+        return RAGResult(
+            answer=result.answer,
+            citations=api_citations,
+            hits=api_hits,
+            trace=result.trace,
+            usage=usage,
+            warnings=result.warnings,
+            mode=RAGMode.AGENTIC,
         )
 
     async def query_stream(self, request: Any):
