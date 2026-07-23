@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Sequence
 
+from src.api.api_models import RAGMode, RAGRequest
 from src.evaluation.agent_metrics import infer_expected_tools, summarize_agent_metrics
 from src.evaluation.answer_metrics import (
     citation_presence_rate,
     enrich_sample_answer_metrics,
     unanswerable_refusal_rate,
 )
-from src.evaluation.dataset import EvaluationSample, load_jsonl_dataset
+from src.evaluation.dataset import EvaluationSample, ExpectedSource, load_jsonl_dataset
 from src.evaluation.graph_metrics import summarize_graph_metrics
 from src.evaluation.runner import (
     MockRAGRunner,
@@ -20,7 +22,6 @@ from src.evaluation.runner import (
     _mock_citation,
     _mock_hit,
 )
-from src.models.rag import RAGMode, RAGRequest
 
 ALL_EVAL_MODES = ("naive", "advanced", "modular", "graph", "agentic")
 
@@ -151,6 +152,7 @@ class RAGServiceModeRunner(BaseModeRunner):
         *,
         kb_id: str = "default",
         top_k: int = 5,
+        model_config: Any | None = None,
         timeout: float | None = None,
     ) -> None:
         if mode not in ALL_EVAL_MODES:
@@ -160,6 +162,7 @@ class RAGServiceModeRunner(BaseModeRunner):
         self.service = service
         self.kb_id = kb_id
         self.top_k = top_k
+        self.model_config = model_config
         self.timeout = timeout
 
     async def run_sample(self, sample: EvaluationSample) -> Dict[str, Any]:
@@ -168,10 +171,16 @@ class RAGServiceModeRunner(BaseModeRunner):
             query=sample.question,
             kb_id=str(sample.metadata.get("kb_id") or self.kb_id),
             mode=self._MODE_MAP[self.mode],
-            options={"top_k": self.top_k},
+            options={
+                "top_k": self.top_k,
+                "model": self.model_config,
+            },
         )
         try:
-            result = await self.service.run_safe(request, timeout=self.timeout)
+            if callable(getattr(self.service, "query", None)):
+                result = await self.service.query(request)
+            else:
+                result = await self.service.run_safe(request, timeout=self.timeout)
         except Exception as exc:  # noqa: BLE001
             latency_ms = round((time.perf_counter() - started) * 1000.0, 3)
             return enrich_sample_answer_metrics(
@@ -273,50 +282,136 @@ class MultiModeEvaluationRunner:
         dataset_path: str,
         modes: Sequence[str],
         runner_factory: Any,
+        sample_limit: int | None = None,
+        samples: Sequence[EvaluationSample] | None = None,
     ) -> None:
         self.dataset_path = dataset_path
         self.modes = list(modes)
         self.runner_factory = runner_factory
+        self.sample_limit = sample_limit
+        self.samples = list(samples) if samples is not None else None
 
     async def run(self) -> Dict[str, Any]:
         from src.evaluation.report import build_final_evaluation_report
 
-        samples = load_jsonl_dataset(self.dataset_path)
-        per_mode_results: List[Dict[str, Any]] = []
-        for mode in self.modes:
-            try:
-                runner = self.runner_factory(mode)
-            except Exception as exc:  # noqa: BLE001
-                per_mode_results.append(
-                    {
-                        "mode": mode,
-                        "runner_type": "unavailable",
-                        "status": "unavailable",
-                        "error": str(exc),
-                        "sample_count": len(samples),
-                        "per_sample_results": [],
-                    }
-                )
-                continue
-            try:
-                mode_result = await EvaluationModeRunner(runner).run(samples)
-            except Exception as exc:  # noqa: BLE001
-                mode_result = {
-                    "mode": mode,
-                    "runner_type": getattr(runner, "runner_type", "unknown"),
-                    "status": "failed",
-                    "error": str(exc),
-                    "sample_count": len(samples),
-                    "per_sample_results": [],
-                }
-            per_mode_results.append(mode_result)
+        samples = list(self.samples) if self.samples is not None else load_jsonl_dataset(self.dataset_path)
+        if self.sample_limit is not None and self.sample_limit > 0:
+            samples = samples[: self.sample_limit]
+        per_mode_results = await asyncio.gather(
+            *(self._run_mode(mode, samples) for mode in self.modes)
+        )
 
         return build_final_evaluation_report(
             dataset_path=self.dataset_path,
             modes=self.modes,
             samples=samples,
             per_mode_results=per_mode_results,
+        ) | {"sample_limit": self.sample_limit}
+
+    async def _run_mode(
+        self,
+        mode: str,
+        samples: Sequence[EvaluationSample],
+    ) -> Dict[str, Any]:
+        try:
+            runner = self.runner_factory(mode)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "mode": mode,
+                "runner_type": "unavailable",
+                "status": "unavailable",
+                "error": str(exc),
+                "sample_count": len(samples),
+                "per_sample_results": [],
+            }
+        try:
+            return await EvaluationModeRunner(runner).run(samples)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "mode": mode,
+                "runner_type": getattr(runner, "runner_type", "unknown"),
+                "status": "failed",
+                "error": str(exc),
+                "sample_count": len(samples),
+                "per_sample_results": [],
+            }
+
+
+def build_chunk_evaluation_samples(
+    chunks: Sequence[Any],
+    *,
+    sample_limit: int | None = None,
+) -> List[EvaluationSample]:
+    """Build source-aligned smoke evaluation samples from indexed chunks.
+
+    This makes the evaluation page usable for any uploaded knowledge base
+    without requiring a hand-written dataset for that specific domain.
+    """
+
+    limit = sample_limit if sample_limit is not None and sample_limit > 0 else len(chunks)
+    samples: List[EvaluationSample] = []
+    for index, chunk in enumerate(chunks[:limit], start=1):
+        text = _chunk_text(chunk)
+        if not text:
+            continue
+        quote = _compact_text(text)[:160]
+        filename = _chunk_filename(chunk)
+        samples.append(
+            EvaluationSample(
+                id=f"dynamic_{index:03d}",
+                question=f"请根据知识库概括这段内容的关键信息：{quote[:80]}",
+                answer_points=[quote[:80]],
+                expected_sources=[
+                    ExpectedSource(
+                        document_id=_chunk_document_id(chunk),
+                        chunk_id=_chunk_id(chunk),
+                        filename=filename,
+                        quote=quote,
+                    )
+                ],
+                tags=["dynamic", "fact"],
+                difficulty="easy",
+                metadata={
+                    "kb_id": _chunk_kb_id(chunk),
+                    "filename": filename,
+                },
+            )
         )
+    return samples
+
+
+def _chunk_text(chunk: Any) -> str:
+    return str(getattr(chunk, "text", "") or "")
+
+
+def _chunk_id(chunk: Any) -> str | None:
+    value = getattr(chunk, "id", None) or _chunk_metadata(chunk).get("chunk_id")
+    return str(value) if value else None
+
+
+def _chunk_document_id(chunk: Any) -> str | None:
+    value = getattr(chunk, "document_id", None) or _chunk_metadata(chunk).get("document_id")
+    return str(value) if value else None
+
+
+def _chunk_kb_id(chunk: Any) -> str | None:
+    value = getattr(chunk, "kb_id", None) or _chunk_metadata(chunk).get("kb_id")
+    return str(value) if value else None
+
+
+def _chunk_filename(chunk: Any) -> str | None:
+    metadata = _chunk_metadata(chunk)
+    value = metadata.get("filename") or metadata.get("source_path") or metadata.get("source")
+    return str(value) if value else None
+
+
+def _chunk_metadata(chunk: Any) -> Dict[str, Any]:
+    metadata = getattr(chunk, "metadata", None)
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _compact_text(text: str) -> str:
+    return " ".join(text.split())
 
 
 def summarize_mode_result(
@@ -427,11 +522,11 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 def _token_total(usage: Any) -> float:
     if not isinstance(usage, dict):
         return 0.0
-    total = usage.get("total")
+    total = usage.get("total") or usage.get("total_tokens")
     if isinstance(total, (int, float)):
         return float(total)
-    prompt = usage.get("prompt") or 0
-    completion = usage.get("completion") or 0
+    prompt = usage.get("prompt") or usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    completion = usage.get("completion") or usage.get("completion_tokens") or usage.get("output_tokens") or 0
     if isinstance(prompt, (int, float)) or isinstance(completion, (int, float)):
         return float(prompt or 0) + float(completion or 0)
     return 0.0
@@ -450,6 +545,7 @@ def create_runner(
     service: Any | None = None,
     kb_id: str = "default",
     top_k: int = 5,
+    model_config: Any | None = None,
     timeout: float | None = None,
 ) -> BaseModeRunner:
     if use_mock:
@@ -459,7 +555,12 @@ def create_runner(
             f"Real runner for mode {mode!r} requires a configured RAGService"
         )
     return RAGServiceModeRunner(
-        service, mode, kb_id=kb_id, top_k=top_k, timeout=timeout
+        service,
+        mode,
+        kb_id=kb_id,
+        top_k=top_k,
+        model_config=model_config,
+        timeout=timeout,
     )
 
 
@@ -470,6 +571,7 @@ __all__ = [
     "MockModeRunner",
     "MultiModeEvaluationRunner",
     "RAGServiceModeRunner",
+    "build_chunk_evaluation_samples",
     "create_runner",
     "summarize_mode_result",
 ]

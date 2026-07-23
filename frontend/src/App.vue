@@ -490,7 +490,7 @@ const navItems = [
   { to: '/chat', icon: '💬', label: '问答实验台' },
   { to: '/knowledge', icon: '📚', label: '知识库管理' },
   { to: '/graph', icon: '🕸️', label: '知识图谱' },
-  { to: '/evaluation', icon: '📊', label: '模式评测' },
+  { to: '/evaluation', icon: '📊', label: 'RAG模式评测' },
 ]
 
 const ragModeOptions = [

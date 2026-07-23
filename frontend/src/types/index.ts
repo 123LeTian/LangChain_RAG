@@ -171,15 +171,23 @@ export interface SystemMetrics {
   estimated_cost_usd: number
 }
 
+export interface AnswerMetrics {
+  coverage: number
+  faithfulness?: number
+  relevance?: number
+}
+
 export interface EvaluationResult {
   run_id: string
   mode: RAGMode
   metrics: {
     retrieval: RetrievalMetrics
+    answer?: AnswerMetrics
     system: SystemMetrics
   }
   sample_count: number
   latency_ms: number
+  model_id?: string | null
 }
 
 // ========== SSE 事件 ==========
