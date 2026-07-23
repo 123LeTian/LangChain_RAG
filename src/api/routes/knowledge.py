@@ -103,6 +103,82 @@ def _find_document(kb_id: str, doc_id: str) -> dict | None:
     return None
 
 
+def _document_path(doc: dict) -> Path:
+    return _PROJECT_ROOT / "documents" / str(doc.get("filename") or "")
+
+
+def _count_document_chunks(kb_id: str, doc: dict) -> int:
+    """Load and split one document so UI stats match the actual RAG index."""
+    from src.ingestion import LoaderFactory
+    from src.ingestion.splitter import split_documents
+
+    path = _document_path(doc)
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    loaded = LoaderFactory.load(
+        path,
+        kb_id=kb_id,
+        document_id=str(doc.get("id") or path.stem),
+    )
+    return len(split_documents([loaded], chunk_size=1500, chunk_overlap=300))
+
+
+def _refresh_chunk_counts(kb_id: str | None = None, *, force: bool = False) -> bool:
+    """Backfill document and KB chunk counts from files on disk.
+
+    Returns True when persisted state changed.
+    """
+    changed = False
+    target_docs = [
+        doc for doc in _MOCK_DOCS
+        if kb_id is None or doc.get("kb_id") == kb_id
+    ]
+
+    for doc in target_docs:
+        if not force and int(doc.get("chunk_count") or 0) > 0:
+            continue
+        try:
+            chunk_count = _count_document_chunks(str(doc.get("kb_id") or kb_id), doc)
+            if doc.get("chunk_count") != chunk_count:
+                doc["chunk_count"] = chunk_count
+                changed = True
+            if doc.get("status") != "indexed":
+                doc["status"] = "indexed"
+                changed = True
+        except Exception as exc:
+            if doc.get("status") != "failed":
+                doc["status"] = "failed"
+                changed = True
+            doc["error"] = f"{type(exc).__name__}: {exc}"
+
+    for kb in _MOCK_KBS:
+        if kb_id is not None and kb.get("id") != kb_id:
+            continue
+        kb_docs = [doc for doc in _MOCK_DOCS if doc.get("kb_id") == kb.get("id")]
+        doc_count = len(kb_docs)
+        chunk_count = sum(int(doc.get("chunk_count") or 0) for doc in kb_docs)
+        if kb.get("doc_count") != doc_count:
+            kb["doc_count"] = doc_count
+            changed = True
+        if kb.get("chunk_count") != chunk_count:
+            kb["chunk_count"] = chunk_count
+            changed = True
+
+    if changed:
+        _persist()
+    return changed
+
+
+def _trigger_rag_rebuild() -> None:
+    try:
+        from src.api.dependencies import _rag_service
+        if hasattr(_rag_service, '_real'):
+            _rag_service._real._initialized = False
+            print(f"[KB] RAG index will rebuild on next query", flush=True)
+    except Exception as e:
+        print(f"[KB] RAG rebuild trigger failed: {e}", flush=True)
+
+
 # ============================================================================
 # Knowledge base CRUD
 # ============================================================================
@@ -127,6 +203,7 @@ async def list_knowledge_bases(
     owner_id: str = "user_001",
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> list[dict]:
+    _refresh_chunk_counts()
     return list(_MOCK_KBS)
 
 
@@ -135,6 +212,7 @@ async def get_knowledge_base(
     kb_id: str,
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> dict:
+    _refresh_chunk_counts(kb_id)
     for kb in _MOCK_KBS:
         if kb["id"] == kb_id:
             return kb
@@ -202,23 +280,18 @@ async def upload_document(
         "chunk_count": 0,
         "size_bytes": len(content),
     }
+    try:
+        doc["chunk_count"] = _count_document_chunks(kb_id, doc)
+        print(f"[KB] Counted {doc['chunk_count']} chunks for {safe_name}", flush=True)
+    except Exception as exc:
+        doc["status"] = "failed"
+        doc["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[KB] Chunk count failed: {doc['error']}", flush=True)
+
     _MOCK_DOCS.append(doc)
 
-    for kb in _MOCK_KBS:
-        if kb["id"] == kb_id:
-            kb["doc_count"] = kb.get("doc_count", 0) + 1
-            break
-
-    _persist()
-
-    # Trigger RAG index rebuild
-    try:
-        from src.api.dependencies import _rag_service
-        if hasattr(_rag_service, '_real'):
-            _rag_service._real._initialized = False
-            print(f"[KB] RAG index will rebuild on next query", flush=True)
-    except Exception as e:
-        print(f"[KB] RAG rebuild trigger failed: {e}", flush=True)
+    _refresh_chunk_counts(kb_id)
+    _trigger_rag_rebuild()
 
     print(f"[KB] Upload complete: {safe_name} ({len(content)} bytes)", flush=True)
     return doc
@@ -229,6 +302,7 @@ async def list_documents(
     kb_id: str,
     service: KnowledgeServiceDep = None,  # type: ignore
 ) -> list[dict]:
+    _refresh_chunk_counts(kb_id)
     return [d for d in _MOCK_DOCS if d["kb_id"] == kb_id]
 
 
@@ -287,7 +361,8 @@ async def delete_document(
                 pass
             break
     _MOCK_DOCS = [d for d in _MOCK_DOCS if not (d["id"] == doc_id and d["kb_id"] == kb_id)]
-    _persist()
+    _refresh_chunk_counts(kb_id, force=True)
+    _trigger_rag_rebuild()
     return None
 
 
@@ -310,9 +385,8 @@ async def create_index(
     }
 
     try:
-        from src.api.dependencies import _rag_service
-        if hasattr(_rag_service, '_real'):
-            _rag_service._real._initialized = False
+        _refresh_chunk_counts(kb_id, force=True)
+        _trigger_rag_rebuild()
     except Exception:
         pass
 

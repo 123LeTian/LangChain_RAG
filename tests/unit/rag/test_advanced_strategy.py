@@ -5,7 +5,7 @@ import pytest
 
 from src.models.knowledge import ChunkRecord
 from src.models.schemas import RetrievalHit
-from src.rag.naive_support import REFUSAL_ANSWER
+from src.rag.naive_support import REFUSAL_ANSWER, build_advanced_instruction
 from src.rag.strategies.advanced import (
     AdvancedRAGStrategy,
     AdvancedRAGValidationError,
@@ -152,6 +152,17 @@ def strategy(**kwargs):
     )
 
 
+def test_advanced_instruction_adds_a_causal_policy_for_why_questions():
+    prompt = build_advanced_instruction(
+        "贵州茅台酒核心产区为什么说不可复制？"
+    )
+
+    assert "WHY_EXPLANATION_POLICY" in prompt
+    assert "证据事实" in prompt
+    assert "原因解释" in prompt
+    assert "不得添加知识库上下文没有的新事实" in prompt
+
+
 def test_full_advanced_pipeline_fuses_reranks_compresses_and_cites_final_context():
     vector = MappingRetriever(
         {
@@ -206,6 +217,10 @@ def test_full_advanced_pipeline_fuses_reranks_compresses_and_cites_final_context
     assert result.citations[0].text_snippet == "grounded t"
     assert "grounded t" in generator.calls[0]["context"]
     assert "grounded text for c" not in generator.calls[0]["context"]
+    assert "Advanced RAG answer policy" in generator.calls[0]["prompt"]
+    assert "有限归纳" in generator.calls[0]["prompt"]
+    assert "知识库中未找到充分依据" in generator.calls[0]["prompt"]
+    assert "正文不要写 [Chunk x]" in generator.calls[0]["prompt"]
     assert result.usage == {"prompt": 20, "completion": 5, "total": 25}
     assert [event.stage for event in result.trace] == [
         FakeTraceStage.REWRITE,
@@ -257,6 +272,47 @@ def test_all_advanced_switches_off_behaves_like_naive_and_emits_no_module_traces
         FakeTraceStage.COMPLETE,
     ]
     assert result.warnings == []
+
+
+def test_synthesis_queries_preserve_a_third_related_chunk_after_compression():
+    vector = MappingRetriever(
+        {
+            "2025年年报里，贵州茅台是如何把产区、工艺、品牌串起来的？": [
+                make_hit("a", 0.9, text="产区提供了不可复制的自然环境。"),
+                make_hit("b", 0.8, text="工艺把产区条件转化为稳定品质。"),
+                make_hit("c", 0.7, text="品牌把品质和文化转成市场影响力。"),
+            ]
+        }
+    )
+    compressor = FakeCompressor(keep=2, text_limit=40)
+    generator = FakeGenerator()
+    options = {
+        "rewrite_enabled": False,
+        "multi_query_enabled": False,
+        "hybrid_enabled": False,
+        "rerank_enabled": False,
+        "compression_enabled": True,
+    }
+
+    result = run(
+        strategy(compressor=compressor).run(
+            request(
+                options,
+                query="2025年年报里，贵州茅台是如何把产区、工艺、品牌串起来的？",
+            ),
+            FakeContext(vector, generator),
+        )
+    )
+
+    assert compressor.calls == [[
+        "a",
+        "b",
+        "c",
+    ]]
+    assert [hit.chunk_id for hit in result.hits] == ["a", "b", "c"]
+    assert "产区提供了不可复制的自然环境。" in generator.calls[0]["context"]
+    assert "工艺把产区条件转化为稳定品质。" in generator.calls[0]["context"]
+    assert "品牌把品质和文化转成市场影响力。" in generator.calls[0]["context"]
 
 
 def test_rewrite_only_uses_first_alternative_and_original_remains_in_trace_plan():

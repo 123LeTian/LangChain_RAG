@@ -105,7 +105,11 @@ class ChatStreamRequest(BaseModel):
     preset_id: Optional[str] = None
     top_k: Optional[int] = Field(default=None, ge=1)
     rerank_top_k: Optional[int] = Field(default=None, ge=1)
+    graph_scope: Optional[str] = Field(default=None, pattern="^(auto|local|global)$")
     score_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_steps: Optional[int] = Field(default=None, ge=4, le=20)
+    agent_vector_enabled: Optional[bool] = None
+    agent_graph_enabled: Optional[bool] = None
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     rewrite_enabled: Optional[bool] = None
     retrieve_enabled: Optional[bool] = None

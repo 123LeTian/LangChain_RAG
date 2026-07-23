@@ -60,3 +60,4 @@ chroma.sqlite3
 # Runtime data (KB persistence)
 data/
 logs/
+.codex-runtime/

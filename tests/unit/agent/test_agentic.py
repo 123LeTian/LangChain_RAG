@@ -7,9 +7,11 @@ import pytest
 from src.agent.state import AgentRunState
 from src.agent.router import AgentRouter, QueryCategory, RouterResult
 from src.agent.tools import (
+    BaseTool,
     AnswerVerifyTool,
     DocumentSummaryTool,
     GraphSearchTool,
+    ToolResult,
     VectorSearchTool,
 )
 from src.agent.workflow import AgentWorkflow
@@ -180,6 +182,24 @@ class _MockLLM:
         return f"[LLM] Answer to query based on context ({len(context)} chars)"
 
 
+class _SpyAnswerVerifyTool(BaseTool):
+    name: str = "answer_verify"
+    description: str = "Spy answer verification"
+
+    def __init__(self):
+        self.last_answer = None
+        self.last_chunks = None
+
+    async def execute(self, answer: str = "", chunks=None, **kwargs):
+        self.last_answer = answer
+        self.last_chunks = chunks or []
+        return ToolResult(
+            success=True,
+            data={"passed": True, "seen_chunks": len(self.last_chunks)},
+            tool_name=self.name,
+        )
+
+
 class _MockRetriever:
     def retrieve(self, query: str, top_k: int = 5, **kw):
         return RAGContext(
@@ -327,6 +347,38 @@ class TestAgentWorkflow:
         assert "verify" in result.steps
         # answer_verify results should be in tool_results
         assert "answer_verify" in result.tool_results
+
+    @pytest.mark.asyncio
+    async def test_verify_uses_list_dict_and_summary_context(self):
+        """Verify should pass vector, graph, and summary context into answer_verify."""
+        state = AgentRunState(query="test")
+        state.set_answer("This is a sufficiently long answer for verification.")
+        state.tool_results["vector_search"] = [
+            {"chunk_id": "v1", "content": "vector context one"},
+        ]
+        state.tool_results["graph_search"] = {
+            "chunks": [
+                {"chunk_id": "g1", "content": "graph context one"},
+            ]
+        }
+        state.tool_results["document_summary"] = {
+            "summary": "summary context one",
+        }
+
+        spy = _SpyAnswerVerifyTool()
+        ctx = RAGContext(
+            query="test",
+            llm=_MockLLM(),
+            retriever=_MockRetriever(),
+            tools=[spy],
+        )
+
+        result = await self.workflow._verify(state, ctx)
+
+        assert "answer_verify" in result.tool_results
+        assert result.tool_results["answer_verify"]["seen_chunks"] == 3
+        assert spy.last_chunks is not None
+        assert len(spy.last_chunks) == 3
 
 
 class TestAgentWorkflowNoTools:

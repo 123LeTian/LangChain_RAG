@@ -472,9 +472,10 @@ const presetDraft = reactive(emptyPresetDraft())
 const chatSettings = reactive({
   modelId: 'mock-chat',
   presetId: 'default-assistant',
-  mode: 'naive',
+  mode: 'direct',
   kbId: '',
   topK: 5,
+  graphScope: 'auto',
   rerankTopK: 5,
   rewriteEnabled: false,
   retrieveEnabled: true,
@@ -493,6 +494,7 @@ const navItems = [
 ]
 
 const ragModeOptions = [
+  { value: 'direct', label: '无 RAG' },
   { value: 'naive', label: 'Naive RAG' },
   { value: 'advanced', label: 'Advanced RAG' },
   { value: 'modular', label: 'Modular RAG' },
@@ -518,7 +520,7 @@ const currentPresetLabel = computed(() =>
 )
 
 const currentRagModeLabel = computed(() =>
-  ragModeOptions.find(mode => mode.value === chatSettings.mode)?.label || 'Naive RAG'
+  ragModeOptions.find(mode => mode.value === chatSettings.mode)?.label || '无 RAG'
 )
 
 const currentKnowledgeBaseLabel = computed(() =>

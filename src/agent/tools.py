@@ -141,8 +141,15 @@ class VectorSearchTool(BaseTool):
         try:
             context = self._retrieval.retrieve(query=query, top_k=top_k, **kwargs)
             data = [
-                {"chunk_id": c.chunk_id, "content": c.content,
-                 "source": c.source.document_id, "score": c.source.score}
+                {
+                    "chunk_id": c.chunk_id,
+                    "content": c.content,
+                    "source": c.source.document_id,
+                    "score": c.source.score,
+                    "filename": c.source.source_path,
+                    "page": c.source.page,
+                    "metadata": c.source.metadata,
+                }
                 for c in context.chunks
             ]
             return ToolResult(success=True, data=data,
@@ -189,7 +196,18 @@ class GraphSearchTool(BaseTool):
         try:
             context = self._graph.graph_search(query=query, top_k=top_k, **kwargs)
             data = {
-                "chunks": [{"chunk_id": c.chunk_id, "content": c.content} for c in context.chunks],
+                "chunks": [
+                    {
+                        "chunk_id": c.chunk_id,
+                        "content": c.content,
+                        "source": c.source.document_id,
+                        "score": c.source.score,
+                        "filename": c.source.source_path,
+                        "page": c.source.page,
+                        "metadata": c.source.metadata,
+                    }
+                    for c in context.chunks
+                ],
             }
             return ToolResult(success=True, data=data,
                             duration_ms=(time.perf_counter() - t0) * 1000, tool_name=self.name)

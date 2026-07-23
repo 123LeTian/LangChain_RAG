@@ -6,7 +6,7 @@
 // ========== 枚举 ==========
 
 /** RAG 运行模式 */
-export type RAGMode = 'naive' | 'advanced' | 'modular' | 'graph' | 'agentic'
+export type RAGMode = 'direct' | 'naive' | 'advanced' | 'modular' | 'graph' | 'agentic'
 
 /** Trace 执行阶段 */
 export type TraceStage =
@@ -232,7 +232,11 @@ export interface ChatStreamRequest {
   preset_id?: string | null
   top_k?: number | null
   rerank_top_k?: number | null
+  graph_scope?: 'auto' | 'local' | 'global' | null
   score_threshold?: number | null
+  max_steps?: number | null
+  agent_vector_enabled?: boolean | null
+  agent_graph_enabled?: boolean | null
   temperature?: number | null
   rewrite_enabled?: boolean | null
   retrieve_enabled?: boolean | null

@@ -75,3 +75,43 @@ def test_bad_chunk_returns_warning_instead_of_raising():
     assert result.entities == []
     assert result.relationships == []
     assert result.warnings
+
+
+def test_extracts_chinese_sales_channel_relationships():
+    text = (
+        "\u9500\u552e\u6a21\u5f0f\u4e3a\uff1a\u516c\u53f8\u4ea7\u54c1\u901a\u8fc7"
+        "\u76f4\u9500\u548c\u6279\u53d1\u4ee3\u7406\u6e20\u9053\u8fdb\u884c\u9500\u552e\u3002"
+        "\u76f4\u9500\u6e20\u9053\u6307\u81ea\u8425\u548c\u201ci \u8305\u53f0\u201d"
+        "\u7b49\u6570\u5b57\u8425\u9500\u5e73\u53f0\u6e20\u9053\uff0c"
+        "\u6279\u53d1\u4ee3\u7406\u6e20\u9053\u6307\u793e\u4f1a\u7ecf\u9500\u5546\u3001"
+        "\u5546\u8d85\u3001\u7535\u5546\u7b49\u6e20\u9053\u3002"
+    )
+
+    result = RuleBasedGraphExtractor().extract_from_chunk(make_chunk(text=text))
+
+    descriptions = {relationship.description for relationship in result.relationships}
+    assert "\u9500\u552e\u6a21\u5f0f contains \u76f4\u9500\u6e20\u9053" in descriptions
+    assert "\u9500\u552e\u6a21\u5f0f contains \u6279\u53d1\u4ee3\u7406\u6e20\u9053" in descriptions
+    assert "\u76f4\u9500\u6e20\u9053 contains \u81ea\u8425" in descriptions
+    assert "\u76f4\u9500\u6e20\u9053 contains i \u8305\u53f0" in descriptions
+    assert "\u6279\u53d1\u4ee3\u7406\u6e20\u9053 contains \u793e\u4f1a\u7ecf\u9500\u5546" in descriptions
+    assert "\u6279\u53d1\u4ee3\u7406\u6e20\u9053 contains \u5546\u8d85" in descriptions
+    assert "\u6279\u53d1\u4ee3\u7406\u6e20\u9053 contains \u7535\u5546" in descriptions
+
+
+def test_extracts_chinese_sales_channel_relationships_across_pdf_line_breaks():
+    text = (
+        "\u9500\u552e\u6a21\u5f0f\u4e3a\uff1a\u516c\u53f8\u4ea7\u54c1\u901a\u8fc7\u76f4\n"
+        "\u9500\u548c\u6279\u53d1\u4ee3\u7406\u6e20\u9053\u8fdb\u884c\u9500\u552e\u3002"
+        "\u76f4\u9500\u6e20\u9053\u6307\u81ea\u8425\u548c\u201ci \u8305\u53f0\u201d"
+        "\u7b49\u6570\u5b57\u8425\u9500\u5e73\u53f0\u6e20\u9053\uff0c\u6279\u53d1\u4ee3\u7406\u6e20\u9053\u6307\n"
+        "\u793e\u4f1a\u7ecf\u9500\u5546\u3001\u5546\u8d85\u3001\u7535\u5546\u7b49\u6e20\u9053\u3002"
+    )
+
+    result = RuleBasedGraphExtractor().extract_from_chunk(make_chunk(text=text))
+
+    descriptions = {relationship.description for relationship in result.relationships}
+    assert "\u9500\u552e\u6a21\u5f0f contains \u76f4\u9500\u6e20\u9053" in descriptions
+    assert "\u9500\u552e\u6a21\u5f0f contains \u6279\u53d1\u4ee3\u7406\u6e20\u9053" in descriptions
+    assert "\u6279\u53d1\u4ee3\u7406\u6e20\u9053 contains \u793e\u4f1a\u7ecf\u9500\u5546" in descriptions
+    assert "\u6279\u53d1\u4ee3\u7406\u6e20\u9053 contains \u7535\u5546" in descriptions

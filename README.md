@@ -12,10 +12,10 @@ a FastAPI backend and Vue 3 frontend.
 - **Embeddings**: HuggingFace `BAAI/bge-small-zh-v1.5` (512-dim, Chinese-optimized)
 - **Retrieval**: `HybridRetriever` (vector + keyword, alpha=0.3)
 - **Reranker**: `SimpleReranker` with Chinese trigram tokenization + phrase boost
-- **Query Rewriting**: LLM-powered (DeepSeek) query expansion
+- **Query Rewriting**: LLM-powered query expansion when a chat model is configured
 - **Context Compression**: Token-budget-aware truncation
 - **Answer Verification**: LLM factuality check (optional)
-- **LLM**: DeepSeek `deepseek-chat` via OpenAI-compatible API
+- **LLM**: User-configured OpenAI-compatible chat model; clean clones default to `Mock Chat`
 
 ### 5-Module Pipeline Switches (Modular RAG)
 Each module can be independently toggled on/off:
@@ -54,7 +54,7 @@ Upload Document -> Save to documents/ -> Load TXT/MD/PDF/DOCX
 -> Text Splitting -> HuggingFace Embedding -> Hybrid Retrieval
 -> [Optional] Query Rewrite -> Merge & Deduplicate
 -> [Optional] Rerank -> [Optional] Compress
--> DeepSeek Generation -> Citation + Trace
+-> LLM Generation -> Citation + Trace
 -> [Optional] Verify
 ```
 
@@ -97,12 +97,16 @@ cd frontend
 npm install
 ```
 
-## Environment Variables
+## Model Configuration
 
-Create a `.env` file in the project root:
+Clean clones only include `Mock Chat`, which requires no API key and is intended
+for local UI/testing flows. To use a real LLM, add a model in the frontend
+model settings or create a `.env` file in the project root and reference that
+environment variable from your model config.
+
+Example DeepSeek environment variables:
 
 ```bash
-# DeepSeek API (required for LLM generation + query rewriting)
 DEEPSEEK_API_KEY=your-api-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat

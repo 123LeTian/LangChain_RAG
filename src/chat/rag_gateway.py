@@ -12,6 +12,7 @@ from src.chat.structured_logger import StructuredLogger
 
 
 ChatStreamEvent = Dict[str, Any]
+DIRECT_RAG_MODE = "direct"
 MOCK_MODEL_ANSWER = "您好，我是本地默认模型，不会回答任何问题，只用于测试，请在模型配置页面添加您的模型"
 
 
@@ -41,7 +42,11 @@ class RAGGateway:
         request_id: Optional[str] = None,
         top_k: Optional[int] = None,
         rerank_top_k: Optional[int] = None,
+        graph_scope: Optional[str] = None,
         score_threshold: Optional[float] = None,
+        max_steps: Optional[int] = None,
+        agent_vector_enabled: Optional[bool] = None,
+        agent_graph_enabled: Optional[bool] = None,
         temperature: Optional[float] = None,
         rewrite_enabled: Optional[bool] = None,
         retrieve_enabled: Optional[bool] = None,
@@ -71,8 +76,8 @@ class RAGGateway:
                     yield event
                 return
 
-            # If no rag_mode specified, stream directly via LLM (daily chat)
-            if not rag_mode:
+            # Direct chat mode streams through the selected LLM without retrieval.
+            if self._is_direct_mode(rag_mode):
                 async for event in self._stream_direct_llm(
                     original_question=original_question,
                     model_config=model_config,
@@ -95,7 +100,11 @@ class RAGGateway:
                 preset_config=preset_config,
                 top_k=top_k,
                 rerank_top_k=rerank_top_k,
+                graph_scope=graph_scope,
                 score_threshold=score_threshold,
+                max_steps=max_steps,
+                agent_vector_enabled=agent_vector_enabled,
+                agent_graph_enabled=agent_graph_enabled,
                 temperature=temperature,
                 rewrite_enabled=rewrite_enabled,
                 retrieve_enabled=retrieve_enabled,
@@ -279,7 +288,11 @@ class RAGGateway:
         preset_config: Optional[Any],
         top_k: Optional[int],
         rerank_top_k: Optional[int],
+        graph_scope: Optional[str],
         score_threshold: Optional[float],
+        max_steps: Optional[int],
+        agent_vector_enabled: Optional[bool],
+        agent_graph_enabled: Optional[bool],
         temperature: Optional[float],
         rewrite_enabled: Optional[bool],
         retrieve_enabled: Optional[bool],
@@ -292,8 +305,16 @@ class RAGGateway:
             options["top_k"] = top_k
         if rerank_top_k is not None:
             options["rerank_top_k"] = rerank_top_k
+        if graph_scope is not None:
+            options["graph_scope"] = graph_scope
         if score_threshold is not None:
             options["score_threshold"] = score_threshold
+        if max_steps is not None:
+            options["max_steps"] = max_steps
+        if agent_vector_enabled is not None:
+            options["agent_vector_enabled"] = agent_vector_enabled
+        if agent_graph_enabled is not None:
+            options["agent_graph_enabled"] = agent_graph_enabled
         if temperature is not None:
             options["temperature"] = temperature
         for key, value in {
@@ -361,6 +382,10 @@ class RAGGateway:
 
     def _is_mock_model(self, model_config: Optional[Any]) -> bool:
         return str(getattr(model_config, "provider", "") or "").lower() == "mock"
+
+    def _is_direct_mode(self, rag_mode: Optional[str]) -> bool:
+        mode = str(rag_mode or "").strip().lower()
+        return mode in {DIRECT_RAG_MODE, "none", "no_rag", "chat"}
 
     def _is_model_identity_question(self, question: str) -> bool:
         text = (question or "").strip().lower().replace("？", "?")

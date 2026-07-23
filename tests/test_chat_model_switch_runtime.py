@@ -21,6 +21,228 @@ from src.chat.model_registry import ModelRegistry
 from src.chat.rag_gateway import RAGGateway
 from src.chat.session_service import SessionService
 from src.chat_storage.sqlite_chat_store import SQLiteChatStore
+from src.models.knowledge import ChunkRecord
+from src.models.schemas import RetrievalHit as SchemaRetrievalHit
+
+
+def test_real_rag_naive_forces_plain_pipeline():
+    service = RealRAGService()
+
+    config = service._parse_config(
+        RAGRequest(
+            query="What is the 2025 revenue?",
+            mode=RAGMode.NAIVE,
+            options={
+                "rewrite_enabled": True,
+                "retrieve_enabled": True,
+                "rerank_enabled": True,
+                "compress_enabled": True,
+                "verify_enabled": True,
+                "top_k": 5,
+                "rerank_top_k": 5,
+            },
+        )
+    )
+
+    assert config == {
+        "rewrite": False,
+        "retrieve": True,
+        "rerank": False,
+        "compress": False,
+        "verify": False,
+        "top_k": 5,
+        "rerank_top_k": 5,
+        "score_threshold": 0.0,
+    }
+
+
+def test_real_rag_advanced_forces_enhanced_pipeline():
+    service = RealRAGService()
+
+    config = service._parse_config(
+        RAGRequest(
+            query="Compare 2025 and 2024 metrics.",
+            mode=RAGMode.ADVANCED,
+            options={
+                "rewrite_enabled": False,
+                "retrieve_enabled": False,
+                "rerank_enabled": False,
+                "compress_enabled": False,
+                "verify_enabled": True,
+                "top_k": 10,
+                "rerank_top_k": 5,
+                "score_threshold": 0.2,
+            },
+        )
+    )
+
+    assert config == {
+        "rewrite": True,
+        "retrieve": True,
+        "rerank": True,
+        "compress": True,
+        "verify": True,
+        "top_k": 10,
+        "rerank_top_k": 5,
+        "score_threshold": 0.2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_real_rag_modular_config_error_is_chinese():
+    service = RealRAGService()
+
+    result = await service.query(
+        RAGRequest(
+            query="贵州茅台的主要业务是什么？",
+            mode=RAGMode.MODULAR,
+            options={
+                "retrieve_enabled": False,
+                "rerank_enabled": True,
+            },
+        )
+    )
+
+    assert result.answer.startswith("[配置错误]")
+    assert "模块“rerank（重排）”依赖模块“retrieve（检索）”" in result.answer
+    assert "[Config Error]" not in result.answer
+
+
+def _schema_hit(chunk_id: str, score: float, text: str) -> SchemaRetrievalHit:
+    return SchemaRetrievalHit(
+        chunk=ChunkRecord(
+            id=chunk_id,
+            document_id=f"doc-{chunk_id}",
+            kb_id="kb-1",
+            text=text,
+            index=0,
+            metadata={
+                "document_id": f"doc-{chunk_id}",
+                "chunk_id": chunk_id,
+                "filename": f"{chunk_id}.md",
+                "kb_id": "kb-1",
+            },
+        ),
+        score=score,
+        rank=1,
+        retriever="fake",
+        metadata={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_rag_advanced_uses_advanced_prompt_and_score_threshold(monkeypatch):
+    class FakeLLM:
+        def __init__(self):
+            self.prompts: List[str] = []
+
+        def invoke(self, prompt: str):
+            self.prompts.append(prompt)
+            return type("Response", (), {"content": "advanced answer"})()
+
+    class FakeRetriever:
+        def retrieve(self, _query: str, _top_k: int):
+            return [
+                _schema_hit("low", 0.1, "low score context"),
+                _schema_hit("high", 0.3, "high score context"),
+            ]
+
+    class FakeReranker:
+        def rerank(self, _query: str, hits: list[SchemaRetrievalHit], _top_k: int):
+            return hits
+
+    class FakeCompressor:
+        def compress(self, hits: list[SchemaRetrievalHit]):
+            return hits
+
+    class FakeCitationBuilder:
+        def build_citations(self, _hits: list[SchemaRetrievalHit]):
+            return []
+
+    async def fake_rewrite(self, query: str, max_queries: int = 3):
+        return [query]
+
+    from src.api.llm_query_rewriter import LLMQueryRewriter
+
+    monkeypatch.setattr(LLMQueryRewriter, "rewrite", fake_rewrite)
+
+    llm = FakeLLM()
+    service = RealRAGService()
+    service._initialized = True
+    service.retriever = FakeRetriever()
+    service.reranker = FakeReranker()
+    service.compressor = FakeCompressor()
+    service.citation_builder = FakeCitationBuilder()
+    service.build_naive_prompt = lambda query, context: f"naive::{query}::{context}"
+    service.build_advanced_prompt = lambda query, context: f"advanced::{query}::{context}"
+    service._create_llm = lambda *args, **kwargs: llm
+
+    result = await service.query(
+        RAGRequest(
+            query="贵州茅台酒核心产区为什么说不可复制？",
+            mode=RAGMode.ADVANCED,
+            options={"top_k": 5, "rerank_top_k": 5, "score_threshold": 0.2},
+        )
+    )
+
+    assert llm.prompts == ["advanced::贵州茅台酒核心产区为什么说不可复制？::[Chunk 1] high score context"]
+    assert [hit.chunk_id for hit in result.hits] == ["high"]
+    assert result.usage["pipeline_config"]["score_threshold"] == 0.2
+    assert "score_threshold=0.20" in result.trace[1].input_summary
+    assert any("score_filtered=1" in event.output_summary for event in result.trace)
+
+
+@pytest.mark.asyncio
+async def test_real_rag_score_threshold_respects_ui_precision(monkeypatch):
+    class FakeLLM:
+        def invoke(self, prompt: str):
+            return type("Response", (), {"content": "advanced answer"})()
+
+    class FakeRetriever:
+        def retrieve(self, _query: str, _top_k: int):
+            return [_schema_hit("precise", 0.399, "marketing network 66 countries")]
+
+    class FakeReranker:
+        def rerank(self, _query: str, hits: list[SchemaRetrievalHit], _top_k: int):
+            for hit in hits:
+                hit.score = 0.4996
+            return hits
+
+    class FakeCompressor:
+        def compress(self, hits: list[SchemaRetrievalHit]):
+            return hits
+
+    class FakeCitationBuilder:
+        def build_citations(self, _hits: list[SchemaRetrievalHit]):
+            return []
+
+    async def fake_rewrite(self, query: str, max_queries: int = 3):
+        return [query]
+
+    from src.api.llm_query_rewriter import LLMQueryRewriter
+
+    monkeypatch.setattr(LLMQueryRewriter, "rewrite", fake_rewrite)
+
+    service = RealRAGService()
+    service._initialized = True
+    service.retriever = FakeRetriever()
+    service.reranker = FakeReranker()
+    service.compressor = FakeCompressor()
+    service.citation_builder = FakeCitationBuilder()
+    service.build_naive_prompt = lambda query, context: f"naive::{query}::{context}"
+    service.build_advanced_prompt = lambda query, context: f"advanced::{query}::{context}"
+    service._create_llm = lambda *args, **kwargs: FakeLLM()
+
+    result = await service.query(
+        RAGRequest(
+            query="贵州茅台的营销网络覆盖到什么范围？",
+            mode=RAGMode.ADVANCED,
+            options={"top_k": 5, "rerank_top_k": 5, "score_threshold": 0.5},
+        )
+    )
+
+    assert result.answer == "advanced answer"
+    assert [hit.chunk_id for hit in result.hits] == ["precise"]
 
 
 class RecordingRAGService:
@@ -103,6 +325,7 @@ def test_chat_stream_request_model_reaches_rag_request_options(runtime_client):
         json={
             "question": "hello",
             "model_id": "deepseek-reasoner",
+            "rag_mode": "naive",
             "temperature": 0.3,
         },
     ) as response:
@@ -127,7 +350,7 @@ def test_chat_stream_uses_session_model_when_request_omits_model(runtime_client)
     with client.stream(
         "POST",
         f"/api/chat/sessions/{session['id']}/stream",
-        json={"question": "hello"},
+        json={"question": "hello", "rag_mode": "naive"},
     ) as response:
         assert response.status_code == 200
         events = _read_sse(response)
@@ -160,7 +383,11 @@ def test_chat_rag_request_uses_original_question_not_history_context(runtime_cli
         with client.stream(
             "POST",
             f"/api/chat/sessions/{session['id']}/stream",
-            json={"question": question, "model_id": "deepseek-reasoner"},
+            json={
+                "question": question,
+                "model_id": "deepseek-reasoner",
+                "rag_mode": "naive",
+            },
         ) as response:
             assert response.status_code == 200
             _read_sse(response)
@@ -282,3 +509,72 @@ async def test_old_rag_request_without_model_config_uses_default_deepseek_path(m
     assert result.answer == "runtime answer"
     assert calls[-1]["model"] == "deepseek-chat"
     assert calls[-1]["base_url"] == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.asyncio
+async def test_real_rag_request_model_config_drives_generation_and_verify(monkeypatch):
+    class FakeResponse:
+        content = "runtime answer"
+
+        usage_metadata = {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        }
+
+    calls: List[Dict[str, Any]] = []
+    invoked_prompts: List[str] = []
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def invoke(self, prompt: str) -> FakeResponse:
+            invoked_prompts.append(prompt)
+            return FakeResponse()
+
+    import langchain_openai
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", FakeChatOpenAI)
+    monkeypatch.setenv("CUSTOM_RAG_API_KEY", "custom-secret")
+    service = RealRAGService()
+    service._initialized = True
+    service.build_naive_prompt = lambda query, context: f"query={query}\ncontext={context}"
+
+    result = await service.query(
+        RAGRequest(
+            query="Explain quarterly margin trends",
+            mode=RAGMode.MODULAR,
+            options={
+                "model": {
+                    "id": "custom-rag",
+                    "provider": "openai",
+                    "display_name": "Custom RAG",
+                    "model_name": "custom-rag-model",
+                    "base_url": "https://llm.example.test/v1",
+                    "api_key_env": "CUSTOM_RAG_API_KEY",
+                    "enabled": True,
+                    "supports_stream": True,
+                },
+                "rewrite_enabled": False,
+                "retrieve_enabled": False,
+                "rerank_enabled": False,
+                "compress_enabled": False,
+                "verify_enabled": True,
+                "temperature": 0.25,
+            },
+        )
+    )
+
+    assert result.answer == "runtime answer"
+    assert calls == [
+        {
+            "model": "custom-rag-model",
+            "api_key": "custom-secret",
+            "temperature": 0.25,
+            "max_tokens": 1000,
+            "base_url": "https://llm.example.test/v1",
+        }
+    ]
+    assert len(invoked_prompts) == 2
+    assert "Explain quarterly margin trends" in invoked_prompts[0]

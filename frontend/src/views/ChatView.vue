@@ -1,11 +1,11 @@
-<template>
-  <section class="chat-view">
+﻿<template>
+  <section class="chat-view" :class="{ 'drawer-open': drawerOpen }">
     <main class="chat-main-panel">
       <div ref="msgContainer" class="chat-scroll">
         <div class="message-stack">
           <div v-if="messages.length === 0" class="welcome-panel">
             <h1>问答实验台</h1>
-            <p>在底部选择模型、RAG 模式和知识库后开始提问。</p>
+            <p>在底部选择模型和 RAG 模式后开始提问。</p>
           </div>
           <div v-if="errorText" class="chat-error">{{ errorText }}</div>
 
@@ -82,157 +82,196 @@
 
       <div class="composer-shell">
         <div class="control-pill-bar" aria-label="生成与 RAG 配置">
-          <div class="toolbar-left">
-            <div class="popover-control">
-              <button class="control-pill" type="button" @click="toggleMenu('preset')">
-                <span>🎯 预设</span>
-                <strong>{{ currentPresetLabel }}</strong>
+          <div class="popover-control control-slot control-slot-preset">
+            <button class="control-pill" type="button" @click="toggleMenu('preset')">
+              <span>🎯 预设</span>
+              <strong>{{ currentPresetLabel }}</strong>
+            </button>
+            <div v-if="openMenu === 'preset'" class="option-popover">
+              <button
+                v-for="item in presetOptions"
+                :key="item.value"
+                :class="['option-item', { selected: generationSettings.preset === item.value }]"
+                type="button"
+                @click="choosePreset(item.value)"
+              >
+                <span>{{ item.label }}</span>
+                <strong v-if="generationSettings.preset === item.value">✓</strong>
               </button>
-              <div v-if="openMenu === 'preset'" class="option-popover">
+            </div>
+          </div>
+
+          <div class="popover-control control-slot control-slot-model">
+            <button class="control-pill" type="button" @click="toggleMenu('model')">
+              <span>🤖 模型</span>
+              <strong>{{ currentModelLabel }}</strong>
+            </button>
+            <div v-if="openMenu === 'model'" class="option-popover">
+              <button
+                v-for="item in modelOptions"
+                :key="item.value"
+                :class="['option-item', { selected: generationSettings.model === item.value }]"
+                type="button"
+                @click="chooseModel(item.value)"
+              >
+                <span>{{ item.label }}</span>
+                <strong v-if="generationSettings.model === item.value">✓</strong>
+              </button>
+            </div>
+          </div>
+
+          <div class="popover-control control-slot control-slot-rag">
+            <button class="control-pill rag-mode-pill" type="button" @click="toggleMenu('rag')">
+              <span>⚡ RAG 模式</span>
+              <strong>{{ currentModeLabel }}</strong>
+            </button>
+            <div v-if="openMenu === 'rag'" class="rag-popover">
+              <div class="rag-mode-list">
                 <button
-                  v-for="item in presetOptions"
-                  :key="item.value"
-                  :class="['option-item', { selected: generationSettings.preset === item.value }]"
+                  v-for="mode in ragModes"
+                  :key="mode.value"
+                  :class="['option-item', { selected: props.chatSettings.mode === mode.value }]"
                   type="button"
-                  @click="choosePreset(item.value)"
+                  @click="chooseRagMode(mode.value)"
                 >
-                  <span>{{ item.label }}</span>
-                  <strong v-if="generationSettings.preset === item.value">✓</strong>
+                  <span>{{ mode.label }}</span>
+                  <strong v-if="props.chatSettings.mode === mode.value">✓</strong>
                 </button>
               </div>
-            </div>
 
-            <div class="popover-control">
-              <button class="control-pill" type="button" @click="toggleMenu('model')">
-                <span>🤖 模型</span>
-                <strong>{{ currentModelLabel }}</strong>
-              </button>
-              <div v-if="openMenu === 'model'" class="option-popover">
-                <button
-                  v-for="item in modelOptions"
-                  :key="item.value"
-                  :class="['option-item', { selected: generationSettings.model === item.value }]"
-                  type="button"
-                  @click="chooseModel(item.value)"
-                >
-                  <span>{{ item.label }}</span>
-                  <strong v-if="generationSettings.model === item.value">✓</strong>
-                </button>
-              </div>
-            </div>
-
-            <span class="control-divider" aria-hidden="true" />
-
-            <div class="rag-cluster">
-              <div class="popover-control">
-                <button class="control-pill rag-mode-pill" type="button" @click="toggleMenu('rag')">
-                  <span>⚡ RAG 模式</span>
+              <div class="rag-params-panel">
+                <header>
                   <strong>{{ currentModeLabel }}</strong>
-                </button>
-                <div v-if="openMenu === 'rag'" class="option-popover">
-                  <button
-                    v-for="mode in ragModes"
-                    :key="mode.value"
-                    :class="['option-item', { selected: props.chatSettings.mode === mode.value }]"
-                    type="button"
-                    @click="chooseRagMode(mode.value)"
-                  >
-                    <span>{{ mode.label }}</span>
-                    <strong v-if="props.chatSettings.mode === mode.value">✓</strong>
-                  </button>
-                </div>
-              </div>
+                  <button type="button" title="关闭" @click="openMenu = ''">×</button>
+                </header>
 
-              <div class="advanced-wrap">
-                <button
-                  class="advanced-pill"
-                  type="button"
-                  :class="{ active: advancedOpen }"
-                  @click="toggleAdvanced"
-                >
-                  ⚙️ 高级参数
-                </button>
+                <p v-if="props.chatSettings.mode === 'direct'" class="direct-mode-note">
+                  直接调用当前模型，不检索知识库。
+                </p>
 
-                <div v-if="advancedOpen" class="advanced-popover">
-                  <header>
-                    <strong>{{ currentModeLabel }}</strong>
-                    <button type="button" title="关闭" @click="advancedOpen = false">×</button>
-                  </header>
-
+                <template v-else>
                   <label class="slider-field">
                     <span>Top-K：{{ props.chatSettings.topK }}</span>
                     <input v-model.number="props.chatSettings.topK" type="range" min="1" max="20" />
                   </label>
+
+                  <div v-if="props.chatSettings.mode === 'graph'" class="segmented-field">
+                    <span>Graph Scope</span>
+                    <div>
+                      <button
+                        v-for="scope in graphScopeOptions"
+                        :key="scope.value"
+                        :class="{ active: props.chatSettings.graphScope === scope.value }"
+                        type="button"
+                        @click="props.chatSettings.graphScope = scope.value"
+                      >
+                        {{ scope.label }}
+                      </button>
+                    </div>
+                  </div>
 
                   <label v-if="props.chatSettings.mode === 'naive'" class="slider-field">
                     <span>Score Threshold：{{ props.chatSettings.scoreThreshold.toFixed(2) }}</span>
                     <input v-model.number="props.chatSettings.scoreThreshold" type="range" min="0" max="1" step="0.05" />
                   </label>
 
-                  <template v-if="advancedModes.includes(props.chatSettings.mode)">
-                    <label class="switch-field">
-                      <span>Query Rewrite</span>
-                      <input v-model="props.chatSettings.rewriteEnabled" type="checkbox" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Retrieve</span>
-                      <input v-model="props.chatSettings.retrieveEnabled" type="checkbox" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Cross-Encoder Rerank</span>
-                      <input v-model="props.chatSettings.rerankEnabled" type="checkbox" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Compress</span>
-                      <input v-model="props.chatSettings.compressEnabled" type="checkbox" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Verify</span>
-                      <input v-model="props.chatSettings.verifyEnabled" type="checkbox" />
-                    </label>
-                    <label class="slider-field">
-                      <span>Rerank Top-K：{{ props.chatSettings.rerankTopK }}</span>
-                      <input v-model.number="props.chatSettings.rerankTopK" type="range" min="1" max="20" />
-                    </label>
-                  </template>
+                      <template v-if="props.chatSettings.mode === 'advanced'">
+                        <label class="switch-field">
+                          <span>Query Rewrite</span>
+                          <input type="checkbox" checked disabled />
+                        </label>
+                        <label class="switch-field">
+                          <span>Retrieve</span>
+                          <input type="checkbox" checked disabled />
+                        </label>
+                        <label class="switch-field">
+                          <span>Cross-Encoder Rerank</span>
+                          <input type="checkbox" checked disabled />
+                        </label>
+                        <label class="switch-field">
+                          <span>Compress</span>
+                          <input type="checkbox" checked disabled />
+                        </label>
+                        <label class="switch-field">
+                          <span>Verify</span>
+                          <input v-model="props.chatSettings.verifyEnabled" type="checkbox" />
+                        </label>
+                        <label class="slider-field">
+                          <span>Score Threshold：{{ props.chatSettings.scoreThreshold.toFixed(2) }}</span>
+                          <input v-model.number="props.chatSettings.scoreThreshold" type="range" min="0" max="1" step="0.05" />
+                        </label>
+                        <label class="slider-field">
+                          <span>Rerank Top-K：{{ props.chatSettings.rerankTopK }}</span>
+                          <input v-model.number="props.chatSettings.rerankTopK" type="range" min="1" max="20" />
+                        </label>
+                      </template>
 
-                  <template v-if="props.chatSettings.mode === 'agentic'">
-                    <label class="slider-field">
-                      <span>Max Steps：{{ props.chatSettings.maxSteps }}</span>
-                      <input v-model.number="props.chatSettings.maxSteps" type="range" min="1" max="12" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Vector Tool</span>
-                      <input v-model="agentTools.vector" type="checkbox" />
-                    </label>
-                    <label class="switch-field">
-                      <span>Graph Tool</span>
-                      <input v-model="agentTools.graph" type="checkbox" />
-                    </label>
-                  </template>
-                </div>
+                      <template v-else-if="props.chatSettings.mode === 'modular'">
+                        <label class="switch-field">
+                          <span>Query Rewrite</span>
+                          <input v-model="props.chatSettings.rewriteEnabled" type="checkbox" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Retrieve</span>
+                          <input v-model="props.chatSettings.retrieveEnabled" type="checkbox" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Cross-Encoder Rerank</span>
+                          <input v-model="props.chatSettings.rerankEnabled" type="checkbox" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Compress</span>
+                          <input v-model="props.chatSettings.compressEnabled" type="checkbox" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Verify</span>
+                          <input v-model="props.chatSettings.verifyEnabled" type="checkbox" />
+                        </label>
+                        <label class="slider-field">
+                          <span>Score Threshold：{{ props.chatSettings.scoreThreshold.toFixed(2) }}</span>
+                          <input v-model.number="props.chatSettings.scoreThreshold" type="range" min="0" max="1" step="0.05" />
+                        </label>
+                        <label class="slider-field">
+                          <span>Rerank Top-K：{{ props.chatSettings.rerankTopK }}</span>
+                          <input v-model.number="props.chatSettings.rerankTopK" type="range" min="1" max="20" />
+                        </label>
+                      </template>
+
+                      <template v-if="props.chatSettings.mode === 'agentic'">
+                        <label class="slider-field">
+                          <span>Max Steps：{{ props.chatSettings.maxSteps }}</span>
+                          <input v-model.number="props.chatSettings.maxSteps" type="range" min="4" max="12" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Vector Tool</span>
+                          <input v-model="agentTools.vector" type="checkbox" />
+                        </label>
+                        <label class="switch-field">
+                          <span>Graph Tool</span>
+                          <input v-model="agentTools.graph" type="checkbox" />
+                        </label>
+                      </template>
+                </template>
               </div>
             </div>
           </div>
 
-          <div class="toolbar-right">
-            <div class="popover-control kb-control">
-              <button class="control-pill kb-pill" type="button" @click="toggleMenu('kb')">
-                <span>📚 知识库</span>
-                <strong>{{ currentKbLabel }}</strong>
+          <div v-if="props.chatSettings.mode !== 'direct'" class="popover-control control-slot control-slot-kb">
+            <button class="control-pill kb-pill" type="button" @click="toggleMenu('kb')">
+              <span>📚 知识库</span>
+              <strong>{{ currentKbLabel }}</strong>
+            </button>
+            <div v-if="openMenu === 'kb'" class="option-popover option-popover-right">
+              <button
+                v-for="item in kbOptions"
+                :key="item.value"
+                :class="['option-item', { selected: props.chatSettings.kbId === item.value }]"
+                type="button"
+                @click="chooseKnowledgeBase(item.value)"
+              >
+                <span>{{ item.label }}</span>
+                <strong v-if="props.chatSettings.kbId === item.value">✓</strong>
               </button>
-              <div v-if="openMenu === 'kb'" class="option-popover option-popover-right">
-                <button
-                  v-for="item in kbOptions"
-                  :key="item.value"
-                  :class="['option-item', { selected: props.chatSettings.kbId === item.value }]"
-                  type="button"
-                  @click="chooseKnowledgeBase(item.value)"
-                >
-                  <span>{{ item.label }}</span>
-                  <strong v-if="props.chatSettings.kbId === item.value">✓</strong>
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -341,11 +380,18 @@ const props = defineProps({
 const emit = defineEmits(['session-created', 'sessions-updated'])
 
 const ragModes = [
+  { value: 'direct', label: '无 RAG' },
   { value: 'naive', label: 'Naive RAG' },
   { value: 'advanced', label: 'Advanced RAG' },
   { value: 'modular', label: 'Modular RAG' },
   { value: 'graph', label: 'GraphRAG' },
   { value: 'agentic', label: 'Agentic RAG' },
+]
+
+const graphScopeOptions = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'local', label: 'Local' },
+  { value: 'global', label: 'Global' },
 ]
 
 const presetOptions = reactive([
@@ -354,7 +400,6 @@ const presetOptions = reactive([
   { value: 'structured', label: '代码/结构化' },
 ])
 
-const advancedModes = ['advanced', 'modular']
 const generationSettings = ref({
   preset: 'default-assistant',
   model: 'mock-chat',
@@ -369,7 +414,6 @@ const messages = ref([])
 const streaming = ref(false)
 const msgContainer = ref(null)
 const drawerOpen = ref(false)
-const advancedOpen = ref(false)
 const openMenu = ref('')
 const activeTab = ref('citations')
 const activeMessage = ref(null)
@@ -397,6 +441,7 @@ function normalizeMessage(message) {
     thinking: false,
     stopped: false,
     summaryOpen: false,
+    mode: props.chatSettings.mode,
     modelLabel: currentModelLabel.value,
     modeLabel: currentModeLabel.value,
   }
@@ -486,6 +531,7 @@ async function sendQuery() {
     thinking: true,
     stopped: false,
     summaryOpen: false,
+    mode: props.chatSettings.mode,
     modelLabel: currentModelLabel.value,
     modeLabel: currentModeLabel.value,
   }
@@ -505,14 +551,18 @@ async function sendQuery() {
       model_id: generationSettings.value.model,
       preset_id: generationSettings.value.preset,
       top_k: props.chatSettings.topK,
-      rerank_top_k: props.chatSettings.rerankTopK,
-      score_threshold: props.chatSettings.scoreThreshold,
+      graph_scope: props.chatSettings.mode === 'graph' ? props.chatSettings.graphScope : null,
+      max_steps: props.chatSettings.mode === 'agentic' ? props.chatSettings.maxSteps : null,
+      agent_vector_enabled: props.chatSettings.mode === 'agentic' ? agentTools.value.vector : null,
+      agent_graph_enabled: props.chatSettings.mode === 'agentic' ? agentTools.value.graph : null,
+      rerank_top_k: props.chatSettings.mode === 'graph' ? null : props.chatSettings.rerankTopK,
+      score_threshold: props.chatSettings.mode === 'graph' ? null : props.chatSettings.scoreThreshold,
       temperature: null,
-      rewrite_enabled: props.chatSettings.rewriteEnabled,
-      retrieve_enabled: props.chatSettings.retrieveEnabled,
-      rerank_enabled: props.chatSettings.rerankEnabled,
-      compress_enabled: props.chatSettings.compressEnabled,
-      verify_enabled: props.chatSettings.verifyEnabled,
+      rewrite_enabled: props.chatSettings.mode === 'graph' ? null : (props.chatSettings.mode === 'advanced' ? true : props.chatSettings.rewriteEnabled),
+      retrieve_enabled: props.chatSettings.mode === 'graph' ? null : (props.chatSettings.mode === 'advanced' ? true : props.chatSettings.retrieveEnabled),
+      rerank_enabled: props.chatSettings.mode === 'graph' ? null : (props.chatSettings.mode === 'advanced' ? true : props.chatSettings.rerankEnabled),
+      compress_enabled: props.chatSettings.mode === 'graph' ? null : (props.chatSettings.mode === 'advanced' ? true : props.chatSettings.compressEnabled),
+      verify_enabled: props.chatSettings.mode === 'graph' ? null : props.chatSettings.verifyEnabled,
     },
     async (event) => {
       if (event.type === 'chunk') {
@@ -597,32 +647,109 @@ function formatScore(score) {
 }
 
 function summaryText(message) {
+  if (isDirectMessage(message)) {
+    if (message.thinking) return '🧠 正在思考...'
+    return `🧠 思考完成 (${totalDuration(message.trace)}ms)`
+  }
   if (message.thinking) return '🧠 正在思考与检索知识库...'
-  const chunksCount = message.citations?.length || retrievedChunkCount(message.trace)
-  return `🧠 已检索 ${chunksCount} 条文档 · 思考完成 (${totalDuration(message.trace)}ms)`
+  const requestedCount = requestedRetrievalCount(message.trace)
+  const candidateCount = retrievedCandidateCount(message.trace) || message.citations?.length || 0
+  const compressedCount = compressedChunkCount(message.trace)
+  const retrievalSummary = requestedCount
+    ? `已请求 Top-${requestedCount}${candidateCount ? ` · 候选 ${candidateCount} 条` : ''}`
+    : candidateCount
+      ? `已检索候选 ${candidateCount} 条`
+      : '已检索知识库'
+  const compressionSummary = compressedCount ? ` · 压缩后 ${compressedCount} 条` : ''
+  return `🧠 ${retrievalSummary}${compressionSummary} · 思考完成 (${totalDuration(message.trace)}ms)`
 }
 
-function retrievedChunkCount(trace = []) {
+function isDirectMessage(message) {
+  if (message?.mode === 'direct') return true
+  if (String(message?.modeLabel || '').includes('无 RAG')) return true
+  return (message?.trace || []).some(item => {
+    const summary = `${item?.input_summary || ''} ${item?.output_summary || ''}`.toLowerCase()
+    return summary.includes('direct chat') || summary.includes('no rag')
+  })
+}
+
+function requestedRetrievalCount(trace = []) {
   const retrieveEvent = trace.find(item => String(item.stage || '').toLowerCase().includes('retrieve'))
   const text = `${retrieveEvent?.output_summary || ''} ${retrieveEvent?.input_summary || ''}`
-  const match = text.match(/(\d+)/)
+  const match = text.match(/(?:requested\s+)?top[_-]?k[=:]\s*(\d+)/i)
+  return match ? Number(match[1]) : 0
+}
+
+function retrievedCandidateCount(trace = []) {
+  const retrieveEvent = trace.find(item => String(item.stage || '').toLowerCase().includes('retrieve'))
+  const text = `${retrieveEvent?.output_summary || ''} ${retrieveEvent?.input_summary || ''}`
+  const match = text.match(/pre-rerank candidates=(\d+)/i) || text.match(/pre-rerank Top-(\d+)/i)
+  return match ? Number(match[1]) : 0
+}
+
+function compressedChunkCount(trace = []) {
+  const compressEvent = trace.find(item => String(item.stage || '').toLowerCase().includes('compress'))
+  const text = `${compressEvent?.output_summary || ''} ${compressEvent?.input_summary || ''}`
+  const match = text.match(/compressed to (\d+) chunks/i)
   return match ? Number(match[1]) : 0
 }
 
 function renderMarkdown(value = '') {
-  const escaped = escapeHtml(value)
-  return escaped
-    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.*)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^\s*[-*]\s+(.*)$/gm, '<p class="md-list">• $1</p>')
-    .replace(/\n{2,}/g, '</p><p>')
-    .replace(/\n/g, '<br>')
-    .replace(/^(.+)$/s, '<p>$1</p>')
+  const lines = String(value || '').replace(/\r\n/g, '\n').split('\n')
+  const blocks = []
+  const paragraph = []
+  const listItems = []
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return
+    blocks.push(`<p>${paragraph.join('<br>')}</p>`)
+    paragraph.length = 0
+  }
+
+  const flushList = () => {
+    if (!listItems.length) return
+    blocks.push(`<ul class="md-list">${listItems.map(item => `<li>${item}</li>`).join('')}</ul>`)
+    listItems.length = 0
+  }
+
+  for (const rawLine of lines) {
+    const trimmedLine = rawLine.trim()
+    if (!trimmedLine) {
+      flushParagraph()
+      flushList()
+      continue
+    }
+
+    const headingMatch = trimmedLine.match(/^(#{1,3})\s+(.*)$/)
+    if (headingMatch) {
+      flushParagraph()
+      flushList()
+      const level = headingMatch[1].length
+      blocks.push(`<h${level}>${formatMarkdownInline(headingMatch[2])}</h${level}>`)
+      continue
+    }
+
+    const listMatch = trimmedLine.match(/^[-*•]\s+(.*)$/)
+    if (listMatch) {
+      flushParagraph()
+      listItems.push(formatMarkdownInline(listMatch[1]))
+      continue
+    }
+
+    flushList()
+    paragraph.push(formatMarkdownInline(rawLine.trimEnd()))
+  }
+
+  flushParagraph()
+  flushList()
+  return blocks.join('')
 }
 
+function formatMarkdownInline(value = '') {
+  return escapeHtml(value)
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+}
 function escapeHtml(value = '') {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -650,7 +777,7 @@ function regenerateFrom(index) {
 }
 
 const currentModeLabel = computed(() =>
-  ragModes.find(mode => mode.value === props.chatSettings.mode)?.label || 'RAG 参数'
+  ragModes.find(mode => mode.value === props.chatSettings.mode)?.label || '无 RAG'
 )
 
 const currentPresetLabel = computed(() =>
@@ -671,13 +798,7 @@ const currentKbLabel = computed(() =>
 )
 
 function toggleMenu(name) {
-  advancedOpen.value = false
   openMenu.value = openMenu.value === name ? '' : name
-}
-
-function toggleAdvanced() {
-  openMenu.value = ''
-  advancedOpen.value = !advancedOpen.value
 }
 
 async function choosePreset(value) {
@@ -729,7 +850,6 @@ async function persistSessionConfig() {
 
 function chooseRagMode(value) {
   props.chatSettings.mode = value
-  openMenu.value = ''
   persistSessionConfig()
 }
 
@@ -843,8 +963,6 @@ onMounted(() => {
 
 watch(() => props.chatSettings.mode, () => {
   drawerOpen.value = false
-  advancedOpen.value = false
-  openMenu.value = ''
 })
 
 watch(() => props.chatSettings.modelId, (modelId) => {
@@ -876,7 +994,6 @@ watch(() => props.newChatSignal, () => {
   drawerOpen.value = false
   activeMessage.value = null
   activeTab.value = 'citations'
-  advancedOpen.value = false
   openMenu.value = ''
   errorText.value = ''
   if (!props.currentSessionId) {
@@ -1016,20 +1133,17 @@ watch(() => props.newChatSignal, () => {
 }
 
 .composer {
-  position: absolute;
-  right: 24px;
-  bottom: 24px;
-  left: 24px;
+  position: relative;
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 8px;
-  width: min(800px, calc(100% - 48px));
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
   border: 1px solid var(--border-color);
   border-radius: 24px;
   background: var(--surface);
   padding: 10px 10px 10px 18px;
-  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
 }
 
 .composer textarea {
@@ -1187,94 +1301,66 @@ watch(() => props.newChatSignal, () => {
   color: var(--text-muted);
 }
 
-.chat-scroll {
-  padding-bottom: 228px;
-}
-
 .composer-shell {
-  position: absolute;
-  right: 24px;
-  bottom: 24px;
-  left: 24px;
   display: grid;
-  gap: 8px;
-  width: min(800px, calc(100% - 48px));
-  margin: 0 auto;
+  gap: 12px;
   z-index: 4;
 }
 
 .control-pill-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns:
+    minmax(170px, max-content)
+    minmax(240px, 300px)
+    minmax(300px, 360px)
+    minmax(180px, 240px);
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 14px;
   border: 1px solid var(--border-color);
-  border-radius: 18px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.92);
-  padding: 6px 8px;
+  padding: 14px 16px;
   box-shadow: 0 12px 34px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(14px);
 }
 
-.toolbar-left,
-.toolbar-right {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.toolbar-left {
-  min-width: 0;
-  flex: 1;
-}
-
-.toolbar-right {
-  flex: 0 0 auto;
-  justify-content: flex-end;
-}
-
 .popover-control {
   position: relative;
+  min-width: 0;
 }
 
-.rag-cluster {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border-color);
-  border-radius: 999px;
-  background: rgba(248, 250, 252, 0.72);
-  padding: 2px;
-  overflow: visible;
+.control-slot {
+  min-width: 0;
 }
 
 .control-pill {
   display: inline-flex;
-  min-height: 32px;
+  width: 100%;
+  min-height: 48px;
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border-color);
   border-radius: 999px;
   background: var(--surface-strong);
-  padding: 0 10px;
+  padding: 0 14px;
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1;
+  min-width: 0;
 }
 
 .control-pill strong {
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 750;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.rag-cluster .control-pill {
-  border: 0;
-  background: transparent;
-}
-
 .control-pill span {
+  flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 12px;
   white-space: nowrap;
@@ -1331,35 +1417,20 @@ watch(() => props.newChatSignal, () => {
   font-size: 12px;
 }
 
-.advanced-wrap {
-  position: relative;
-}
-
-.advanced-pill {
-  min-height: 32px;
-  border: 0;
-  border-left: 1px solid var(--border-color);
-  border-radius: 0 999px 999px 0;
-  background: transparent;
-  padding: 0 11px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.advanced-pill:hover,
-.advanced-pill.active,
 .control-pill:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
 }
 
-.advanced-popover {
+.rag-popover {
   position: absolute;
-  right: 0;
+  left: 0;
   bottom: 42px;
   display: grid;
-  width: 276px;
+  grid-template-columns: 190px minmax(260px, 320px);
+  width: min(560px, calc(100vw - 36px));
+  min-height: 318px;
+  max-height: min(420px, calc(100vh - 190px));
   gap: 12px;
   border: 1px solid var(--border-color);
   border-radius: 14px;
@@ -1368,17 +1439,51 @@ watch(() => props.newChatSignal, () => {
   box-shadow: var(--shadow-md);
 }
 
-.advanced-popover header {
+.rag-mode-list {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 0;
+  border-right: 1px solid var(--border-color);
+  padding-right: 10px;
+}
+
+.rag-params-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
+}
+
+.rag-params-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.rag-params-panel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.55);
+}
+
+.rag-params-panel header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  background: var(--surface);
 }
 
-.advanced-popover header strong {
+.rag-params-panel header strong {
   font-size: 13px;
 }
 
-.advanced-popover header button {
+.rag-params-panel header button {
   display: grid;
   width: 24px;
   height: 24px;
@@ -1389,12 +1494,54 @@ watch(() => props.newChatSignal, () => {
   color: var(--text-secondary);
 }
 
+.direct-mode-note {
+  display: grid;
+  min-height: 214px;
+  align-content: center;
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .slider-field,
 .switch-field {
   display: grid;
   gap: 6px;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.segmented-field {
+  display: grid;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.segmented-field > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  padding: 4px;
+}
+
+.segmented-field button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.segmented-field button.active {
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .switch-field {
@@ -1407,13 +1554,6 @@ watch(() => props.newChatSignal, () => {
   accent-color: #17212b;
 }
 
-.control-divider {
-  width: 1px;
-  height: 14px;
-  margin: 0 4px;
-  background: var(--border-color);
-}
-
 .composer {
   position: relative;
   right: auto;
@@ -1424,54 +1564,47 @@ watch(() => props.newChatSignal, () => {
   border-radius: 22px;
 }
 
+@media (max-width: 1180px) {
+  .control-pill-bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 700px) {
-  .chat-scroll {
-    padding: 32px 16px 250px;
-  }
-
-  .composer-shell {
-    right: 12px;
-    bottom: 14px;
-    left: 12px;
-    width: calc(100% - 24px);
-  }
-
   .composer {
     width: 100%;
   }
 
-  .control-pill-bar,
-  .toolbar-left,
-  .toolbar-right {
+  .control-pill-bar {
     align-items: stretch;
   }
 
   .control-pill-bar {
-    flex-direction: column;
-  }
-
-  .toolbar-left,
-  .toolbar-right {
-    width: 100%;
+    grid-template-columns: 1fr;
+    padding: 10px;
   }
 
   .control-pill,
-  .rag-cluster,
-  .kb-control,
   .kb-pill {
     width: 100%;
   }
 
-  .rag-cluster {
-    flex-wrap: wrap;
-    border-radius: 16px;
+  .rag-popover {
+    left: 0;
+    grid-template-columns: 1fr;
+    width: 100%;
+    min-height: 360px;
+    max-height: min(520px, calc(100vh - 220px));
+    overflow: hidden;
   }
 
-  .advanced-pill {
-    border-left: 0;
-    border-top: 1px solid var(--border-color);
-    border-radius: 0 0 16px 16px;
-    width: 100%;
+  .rag-mode-list {
+    max-height: 176px;
+    overflow-y: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+    padding-right: 0;
+    padding-bottom: 10px;
   }
 }
 
@@ -1481,12 +1614,15 @@ watch(() => props.newChatSignal, () => {
 }
 
 .chat-main-panel {
+  --chat-canvas-width: min(1180px, calc(100% - 48px));
+
   position: relative;
   display: flex;
   min-width: 0;
   flex: 1 1 auto;
   flex-direction: column;
   height: 100%;
+  overflow: hidden;
   transition: flex-basis 0.3s ease, width 0.3s ease;
 }
 
@@ -1494,7 +1630,8 @@ watch(() => props.newChatSignal, () => {
   flex: 1 1 auto;
   height: auto;
   min-height: 0;
-  padding: 56px 24px 24px;
+  overflow-y: auto;
+  padding: 56px 24px 36px;
 }
 
 .composer-shell {
@@ -1503,9 +1640,9 @@ watch(() => props.newChatSignal, () => {
   bottom: auto;
   left: auto;
   flex: 0 0 auto;
-  width: min(800px, calc(100% - 48px));
+  width: var(--chat-canvas-width);
   margin: 0 auto;
-  padding: 0 0 24px;
+  padding: 0 0 28px;
 }
 
 .debug-drawer {
@@ -1559,9 +1696,32 @@ watch(() => props.newChatSignal, () => {
 
 .message-stack {
   display: flex;
-  width: min(768px, 100%);
+  width: var(--chat-canvas-width);
   flex-direction: column;
   gap: 24px;
+}
+
+.control-pill-bar,
+.composer {
+  width: 100%;
+}
+
+.chat-view.drawer-open .chat-main-panel {
+  --chat-canvas-width: min(1088px, calc(100% - 96px));
+}
+
+.chat-view.drawer-open .control-pill-bar {
+  grid-template-columns:
+    minmax(0, 0.9fr)
+    minmax(0, 1.2fr)
+    minmax(0, 1.35fr)
+    minmax(0, 0.95fr);
+}
+
+@media (max-width: 1500px) {
+  .chat-view.drawer-open .control-pill-bar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
 }
 
 .message {
@@ -1669,17 +1829,17 @@ watch(() => props.newChatSignal, () => {
 }
 
 .markdown-body {
-  line-height: 1.75;
+  line-height: 1.6;
 }
 
 .markdown-body :deep(p) {
-  margin: 0 0 10px;
+  margin: 0 0 6px;
 }
 
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
 .markdown-body :deep(h3) {
-  margin: 10px 0 8px;
+  margin: 8px 0 6px;
   color: var(--text-primary);
   line-height: 1.3;
 }
@@ -1692,8 +1852,13 @@ watch(() => props.newChatSignal, () => {
   font-size: 0.92em;
 }
 
-.markdown-body :deep(.md-list) {
-  margin: 4px 0;
+.markdown-body :deep(ul.md-list) {
+  margin: 2px 0 6px;
+  padding-left: 1.2em;
+}
+
+.markdown-body :deep(ul.md-list li) {
+  margin: 2px 0;
 }
 
 .ai-action-footer {
@@ -1791,7 +1956,28 @@ watch(() => props.newChatSignal, () => {
   color: #475569;
 }
 
-.composer-shell {
-  width: min(768px, calc(100% - 48px));
+@media (max-width: 1180px) {
+  .chat-main-panel {
+    --chat-canvas-width: min(920px, calc(100% - 40px));
+  }
+}
+
+@media (max-width: 700px) {
+  .chat-main-panel {
+    --chat-canvas-width: calc(100% - 24px);
+  }
+
+  .chat-scroll {
+    padding: 32px 12px 28px;
+  }
+
+  .composer-shell {
+    padding: 12px 0 16px;
+  }
+
+  .chat-view.drawer-open .control-pill-bar {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
+
